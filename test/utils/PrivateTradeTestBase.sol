@@ -3,6 +3,8 @@ pragma solidity >=0.8.0 <0.9.0;
 
 import {Test} from "forge-std/Test.sol";
 
+import {ICowSettlement} from "../../src/vendor/CowWrapper.sol";
+
 import {IVault} from "cowprotocol/contracts/interfaces/IVault.sol";
 import {IERC20} from "cowprotocol/contracts/interfaces/IERC20.sol";
 import {GPv2Settlement} from "cowprotocol/contracts/GPv2Settlement.sol";
@@ -66,7 +68,7 @@ abstract contract PrivateTradeTestBase is Test {
 
     cow = new ComposableCoW(address(settlement));
 
-    wrapper = new PrivateTradeWrapper(payable(address(settlement)));
+    wrapper = new PrivateTradeWrapper(ICowSettlement(address(settlement)));
     handler = new PrivateTradeOrder(wrapper);
 
     allowList.addSolver(address(wrapper));
@@ -197,6 +199,41 @@ abstract contract PrivateTradeTestBase is Test {
 
   function _wrapperData(PrivateTradeTerms memory terms) internal pure returns (bytes memory) {
     return abi.encode(PrivateTradeLib.offerId(terms.offer), terms);
+  }
+
+  /// @dev The bundle chain for a single private trade wrapper. No next-wrapper address follows,
+  /// because the wrapper only runs as the final bundle.
+  function _chainedWrapperData(PrivateTradeTerms memory terms) internal pure returns (bytes memory) {
+    bytes memory data = _wrapperData(terms);
+    return abi.encodePacked(uint16(data.length), data);
+  }
+
+  /// @dev The exact calldata a solver would send to `GPv2Settlement.settle`.
+  function _settleDataWith(
+    IERC20[] memory tokens,
+    uint256[] memory clearingPrices,
+    GPv2Trade.Data[] memory trades,
+    GPv2Interaction.Data[][3] memory interactions
+  ) internal view returns (bytes memory) {
+    return abi.encodeCall(settlement.settle, (tokens, clearingPrices, trades, interactions));
+  }
+
+  function _settleData(
+    PrivateTradeTerms memory terms,
+    IConditionalOrder.ConditionalOrderParams memory makerParams,
+    IConditionalOrder.ConditionalOrderParams memory takerParams
+  ) internal view returns (bytes memory) {
+    return _settleDataWith(_tokens(), _clearingPrices(), _trades(terms, makerParams, takerParams), _emptyInteractions());
+  }
+
+  /// @dev Submit the pair through the wrapper, as the bonded solver would.
+  function _settle(
+    PrivateTradeTerms memory terms,
+    IConditionalOrder.ConditionalOrderParams memory makerParams,
+    IConditionalOrder.ConditionalOrderParams memory takerParams
+  ) internal returns (bytes4 magic) {
+    vm.prank(solver);
+    magic = wrapper.wrappedSettle(_settleData(terms, makerParams, takerParams), _chainedWrapperData(terms));
   }
 
   /// @dev Full happy-path setup: wallet fixtures plus both conditional orders authorised.

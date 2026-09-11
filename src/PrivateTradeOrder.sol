@@ -2,7 +2,7 @@
 pragma solidity >=0.8.0 <0.9.0;
 
 import {GPv2Order} from "cowprotocol/contracts/libraries/GPv2Order.sol";
-import {GPv2Wrapper} from "cowprotocol/contracts/GPv2Wrapper.sol";
+import {CowWrapper} from "./vendor/CowWrapper.sol";
 import {IERC165} from "safe/interfaces/IERC165.sol";
 import {IConditionalOrder, IConditionalOrderGenerator} from "composable-cow/interfaces/IConditionalOrder.sol";
 
@@ -42,7 +42,7 @@ contract PrivateTradeOrder is IConditionalOrderGenerator {
 
   constructor(IPrivateTradeWrapper wrapper) {
     WRAPPER = wrapper;
-    SETTLEMENT = address(GPv2Wrapper(payable(address(wrapper))).UPSTREAM_SETTLEMENT());
+    SETTLEMENT = address(CowWrapper(address(wrapper)).SETTLEMENT());
   }
 
   /// @inheritdoc IConditionalOrder

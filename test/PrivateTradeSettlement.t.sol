@@ -9,6 +9,7 @@ import {GPv2Signing} from "cowprotocol/contracts/mixins/GPv2Signing.sol";
 import {IConditionalOrder} from "composable-cow/interfaces/IConditionalOrder.sol";
 
 import {
+  PrivateOffer,
   PrivateTradeTerms,
   PrivateTradeRole,
   PrivateTrade_NoActiveTrade,
@@ -18,12 +19,18 @@ import {
   PrivateTrade_OrderMismatch,
   PrivateTrade_NotReciprocal,
   PrivateTrade_TakerNotAllowed,
-  PrivateTrade_NotSettlementCaller
+  PrivateTrade_NotSettlementCaller,
+  PrivateTrade_NotLastWrapper,
+  PrivateTrade_BadTaker,
+  PrivateTrade_OfferIdMismatch,
+  PrivateTrade_InvalidSettleData
 } from "../src/interfaces/IPrivateTrade.sol";
 import {PrivateTradeLib} from "../src/libraries/PrivateTradeLib.sol";
+import {CowWrapper, ICowWrapper} from "../src/vendor/CowWrapper.sol";
 import {PrivateTradeTestBase} from "./utils/PrivateTradeTestBase.sol";
 
-/// @notice End-to-end behaviour of a private trade, against a real `GPv2Settlement`.
+/// @notice End-to-end behaviour of a private trade, against a real `GPv2Settlement` and the real
+/// Atomic Bundle entry point.
 contract PrivateTradeSettlementTest is PrivateTradeTestBase {
   // --- happy path
 
@@ -40,7 +47,8 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
     assertEq(wbtc.balanceOf(address(bob)), WBTC_AMOUNT);
     assertEq(usdc.balanceOf(address(bob)), 0);
 
-    _settle(terms, makerParams, takerParams);
+    bytes4 magic = _settle(terms, makerParams, takerParams);
+    assertEq(magic, ICowWrapper.wrappedSettle.selector, "wrapper did not return its selector");
 
     assertEq(usdc.balanceOf(address(alice)), 0, "alice still holds USDC");
     assertEq(wbtc.balanceOf(address(alice)), WBTC_AMOUNT, "alice did not receive WBTC");
@@ -143,11 +151,8 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
       )
     );
     wrapper.wrappedSettle(
-      _tokens(),
-      _clearingPrices(),
-      _trades(tampered, makerParams, carolParams),
-      _emptyInteractions(),
-      _wrapperData(tampered)
+      _settleDataWith(_tokens(), _clearingPrices(), _trades(tampered, makerParams, carolParams), _emptyInteractions()),
+      _chainedWrapperData(tampered)
     );
   }
 
@@ -169,11 +174,10 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
     vm.prank(solver);
     vm.expectRevert(abi.encodeWithSelector(PrivateTrade_TakerNotAllowed.selector, address(bob), address(carol)));
     wrapper.wrappedSettle(
-      _tokens(),
-      _clearingPrices(),
-      _trades(carolTerms, makerParams, carolParams),
-      _emptyInteractions(),
-      _wrapperData(carolTerms)
+      _settleDataWith(
+        _tokens(), _clearingPrices(), _trades(carolTerms, makerParams, carolParams), _emptyInteractions()
+      ),
+      _chainedWrapperData(carolTerms)
     );
   }
 
@@ -189,9 +193,57 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
 
     vm.prank(solver);
     vm.expectRevert(bytes("GPv2: order filled"));
-    wrapper.wrappedSettle(
-      _tokens(), _clearingPrices(), _trades(terms, makerParams, takerParams), _emptyInteractions(), _wrapperData(terms)
-    );
+    wrapper.wrappedSettle(_settleData(terms, makerParams, takerParams), _chainedWrapperData(terms));
+  }
+
+  // --- bundle-specific rules
+
+  /// @dev An intermediate bundle can rewrite `settleData` after validation, so this wrapper only
+  /// runs as the last bundle in the chain.
+  function test_rejectsBeingAnIntermediateBundle() public {
+    (
+      PrivateTradeTerms memory terms,
+      IConditionalOrder.ConditionalOrderParams memory makerParams,
+      IConditionalOrder.ConditionalOrderParams memory takerParams
+    ) = _readyTrade();
+
+    bytes memory data = _wrapperData(terms);
+    bytes memory chained = abi.encodePacked(uint16(data.length), data, address(0xBEEF));
+
+    vm.prank(solver);
+    vm.expectRevert(PrivateTrade_NotLastWrapper.selector);
+    wrapper.wrappedSettle(_settleData(terms, makerParams, takerParams), chained);
+  }
+
+  /// @dev `validateWrapperData` is the check `CowWrapperHelpers` performs before an order is
+  /// placed; it must reject nonsense without touching state.
+  function test_validateWrapperDataRejectsSelfTaker() public {
+    PrivateTradeTerms memory terms = _terms(address(bob), address(bob));
+    terms.taker = address(alice);
+
+    vm.expectRevert(PrivateTrade_BadTaker.selector);
+    wrapper.validateWrapperData(_wrapperData(terms));
+  }
+
+  function test_validateWrapperDataRejectsTamperedOfferId() public {
+    PrivateTradeTerms memory terms = _terms(address(bob), address(bob));
+    bytes memory data = abi.encode(keccak256("not-the-offer"), terms);
+
+    vm.expectRevert(PrivateTrade_OfferIdMismatch.selector);
+    wrapper.validateWrapperData(data);
+  }
+
+  function test_validateWrapperDataAcceptsValidTerms() public {
+    PrivateTradeTerms memory terms = _terms(address(bob), address(bob));
+    wrapper.validateWrapperData(_wrapperData(terms));
+  }
+
+  function test_rejectsNonSettleCalldata() public {
+    (PrivateTradeTerms memory terms,,) = _readyTrade();
+
+    vm.prank(solver);
+    vm.expectRevert(PrivateTrade_InvalidSettleData.selector);
+    wrapper.wrappedSettle(hex"deadbeef", _chainedWrapperData(terms));
   }
 
   // --- wrapper-side rejections
@@ -209,7 +261,8 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
     vm.prank(solver);
     vm.expectRevert(PrivateTrade_NotReciprocal.selector);
     wrapper.wrappedSettle(
-      _tokens(), prices, _trades(terms, makerParams, takerParams), _emptyInteractions(), _wrapperData(terms)
+      _settleDataWith(_tokens(), prices, _trades(terms, makerParams, takerParams), _emptyInteractions()),
+      _chainedWrapperData(terms)
     );
   }
 
@@ -225,7 +278,9 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
 
     vm.prank(solver);
     vm.expectRevert(abi.encodeWithSelector(PrivateTrade_OrderMismatch.selector, 1));
-    wrapper.wrappedSettle(_tokens(), _clearingPrices(), trades, _emptyInteractions(), _wrapperData(terms));
+    wrapper.wrappedSettle(
+      _settleDataWith(_tokens(), _clearingPrices(), trades, _emptyInteractions()), _chainedWrapperData(terms)
+    );
   }
 
   function test_rejectsSingleTrade() public {
@@ -241,7 +296,9 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
 
     vm.prank(solver);
     vm.expectRevert(PrivateTrade_BadSettlementShape.selector);
-    wrapper.wrappedSettle(_tokens(), _clearingPrices(), one, _emptyInteractions(), _wrapperData(terms));
+    wrapper.wrappedSettle(
+      _settleDataWith(_tokens(), _clearingPrices(), one, _emptyInteractions()), _chainedWrapperData(terms)
+    );
   }
 
   function test_rejectsAnyInteraction() public {
@@ -258,7 +315,8 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
     vm.prank(solver);
     vm.expectRevert(PrivateTrade_InteractionsNotAllowed.selector);
     wrapper.wrappedSettle(
-      _tokens(), _clearingPrices(), _trades(terms, makerParams, takerParams), interactions, _wrapperData(terms)
+      _settleDataWith(_tokens(), _clearingPrices(), _trades(terms, makerParams, takerParams), interactions),
+      _chainedWrapperData(terms)
     );
   }
 
@@ -270,10 +328,8 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
     ) = _readyTrade();
 
     vm.prank(makeAddr("random"));
-    vm.expectRevert(bytes("GPv2Wrapper: not a solver"));
-    wrapper.wrappedSettle(
-      _tokens(), _clearingPrices(), _trades(terms, makerParams, takerParams), _emptyInteractions(), _wrapperData(terms)
-    );
+    vm.expectRevert(abi.encodeWithSelector(CowWrapper.NotASolver.selector, makeAddr("random")));
+    wrapper.wrappedSettle(_settleData(terms, makerParams, takerParams), _chainedWrapperData(terms));
   }
 
   /// @dev The handler refuses to validate anything unless the settlement is the caller.
@@ -318,16 +374,7 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
     assertEq(uint256(signingScheme), uint256(GPv2Signing.Scheme.Eip1271));
   }
 
-  // --- internals
-
-  function _settle(
-    PrivateTradeTerms memory terms,
-    IConditionalOrder.ConditionalOrderParams memory makerParams,
-    IConditionalOrder.ConditionalOrderParams memory takerParams
-  ) internal {
-    vm.prank(solver);
-    wrapper.wrappedSettle(
-      _tokens(), _clearingPrices(), _trades(terms, makerParams, takerParams), _emptyInteractions(), _wrapperData(terms)
-    );
+  function test_nameIsSet() public {
+    assertEq(wrapper.name(), "PrivateTradeWrapper");
   }
 }

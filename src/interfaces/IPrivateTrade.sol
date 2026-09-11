@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity >=0.8.0 <0.9.0;
 
-import {GPv2Order} from "cowprotocol/contracts/libraries/GPv2Order.sol";
-import {GPv2Trade} from "cowprotocol/contracts/libraries/GPv2Trade.sol";
-import {GPv2Interaction} from "cowprotocol/contracts/libraries/GPv2Interaction.sol";
-import {IERC20} from "cowprotocol/contracts/interfaces/IERC20.sol";
-
 /// @title Private Trades - shared types
 /// @notice A Private Trade is a pair of reciprocal, fill-or-kill CoW orders that are
 /// valid **only** inside the settlement that executes both of them together.
@@ -91,6 +86,20 @@ error PrivateTrade_BadOrderHash();
 /// @dev Raised when `verify` is called for an owner that does not match the role.
 error PrivateTrade_OwnerRoleMismatch(PrivateTradeRole role, address expected, address actual);
 
+/// @dev Raised when the bundle is not the last one in the chain.
+/// @dev Nothing may run between this wrapper's validation and `GPv2Settlement.settle`, because an
+/// intermediate bundle can rewrite the settlement calldata after it has been validated.
+error PrivateTrade_NotLastWrapper();
+
+/// @dev Raised when the offer itself is structurally unusable.
+error PrivateTrade_BadOffer();
+
+/// @dev Raised when the offer's expiry has passed.
+error PrivateTrade_Expired();
+
+/// @dev Raised when `settleData` is not a call to `settle`.
+error PrivateTrade_InvalidSettleData();
+
 /// @notice View of the settlement context a conditional order validates against.
 interface IPrivateTradeWrapper {
   /// @notice Offer currently being settled, or `bytes32(0)` outside a private trade settlement.
@@ -98,18 +107,4 @@ interface IPrivateTradeWrapper {
 
   /// @notice Counterparty currently being settled, or `address(0)` outside a private trade settlement.
   function activeTaker() external view returns (address);
-}
-
-/// @notice The settlement shape a wrapper accepts, shared with tests and drivers.
-/// @dev `tokens` is exactly two tokens, `[makerSellToken, makerBuyToken]`; `trades` is exactly two
-/// trades, `[makerOrder, takerOrder]`; every interaction list is empty; and `wrapperData` is
-/// `abi.encode(bytes32 declaredOfferId, PrivateTradeTerms terms)`.
-interface IPrivateTradeSettlement {
-  function wrappedSettle(
-    IERC20[] calldata tokens,
-    uint256[] calldata clearingPrices,
-    GPv2Trade.Data[] calldata trades,
-    GPv2Interaction.Data[][3] calldata interactions,
-    bytes calldata wrapperData
-  ) external;
 }

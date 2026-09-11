@@ -10,4 +10,4 @@
 [submodule "lib/cow-contracts"]
 	path = lib/cow-contracts
 	url = https://github.com/cowprotocol/contracts
-	branch = feat/wrapper
+	branch = main
