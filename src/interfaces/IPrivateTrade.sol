@@ -38,7 +38,6 @@ struct PrivateOffer {
 struct PrivateTradeTerms {
   PrivateOffer offer;
   address taker;
-  bytes32 appData;
 }
 
 /// @dev Raised when the wrapper's declared `offerId` does not match the offer it carries.
@@ -99,6 +98,9 @@ error PrivateTrade_Expired();
 
 /// @dev Raised when `settleData` is not a call to `settle`.
 error PrivateTrade_InvalidSettleData();
+
+/// @dev Raised when the two orders do not commit to the same appData document.
+error PrivateTrade_AppDataMismatch(bytes32 makerAppData, bytes32 takerAppData);
 
 /// @notice View of the settlement context a conditional order validates against.
 interface IPrivateTradeWrapper {

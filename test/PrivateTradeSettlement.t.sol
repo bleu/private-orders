@@ -347,7 +347,7 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
       bytes32(0),
       makerParams.staticInput,
       "",
-      PrivateTradeLib.makerOrder(terms)
+      PrivateTradeLib.makerOrder(terms, APP_DATA)
     );
   }
 
@@ -356,8 +356,9 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
   /// @dev Guards against the local flags encoder drifting from the settlement's decoder.
   function test_tradeFlagsDecodeAsExactSellOrder() public {
     (PrivateTradeTerms memory terms,,) = _readyTrade();
-    GPv2Trade.Data memory trade =
-      _trade(PrivateTradeLib.makerOrder(terms), _params(PrivateTradeRole.Maker, terms, "maker"), address(alice), 0, 1);
+    GPv2Trade.Data memory trade = _trade(
+      PrivateTradeLib.makerOrder(terms, APP_DATA), _params(PrivateTradeRole.Maker, terms, "maker"), address(alice), 0, 1
+    );
 
     (
       bytes32 kind,

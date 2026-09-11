@@ -196,8 +196,8 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
 
     address[2] memory expectedOwners = [terms.offer.maker, terms.taker];
     GPv2Order.Data[] memory expected = new GPv2Order.Data[](2);
-    expected[0] = PrivateTradeLib.makerOrder(terms);
-    expected[1] = PrivateTradeLib.takerOrder(terms);
+    expected[0] = PrivateTradeLib.makerOrder(terms, trades[0].appData);
+    expected[1] = PrivateTradeLib.takerOrder(terms, trades[1].appData);
 
     for (uint256 i = 0; i < 2; ++i) {
       GPv2Order.Data memory order;

@@ -3,7 +3,8 @@ pragma solidity >=0.8.0 <0.9.0;
 
 import {Test} from "forge-std/Test.sol";
 
-import {ICowSettlement} from "../../src/vendor/CowWrapper.sol";
+import {ICowAuthentication, ICowSettlement} from "../../src/vendor/CowWrapper.sol";
+import {CowWrapperHelpers} from "../../src/vendor/CowWrapperHelpers.sol";
 
 import {IVault} from "cowprotocol/contracts/interfaces/IVault.sol";
 import {IERC20} from "cowprotocol/contracts/interfaces/IERC20.sol";
@@ -42,6 +43,7 @@ abstract contract PrivateTradeTestBase is Test {
   ComposableCoW internal cow;
   PrivateTradeWrapper internal wrapper;
   PrivateTradeOrder internal handler;
+  CowWrapperHelpers internal helpers;
 
   TestERC20 internal usdc;
   TestERC20 internal wbtc;
@@ -70,6 +72,7 @@ abstract contract PrivateTradeTestBase is Test {
 
     wrapper = new PrivateTradeWrapper(ICowSettlement(address(settlement)));
     handler = new PrivateTradeOrder(wrapper);
+    helpers = new CowWrapperHelpers(ICowAuthentication(address(allowList)));
 
     allowList.addSolver(address(wrapper));
     allowList.addSolver(solver);
@@ -100,8 +103,7 @@ abstract contract PrivateTradeTestBase is Test {
         validTo: uint32(block.timestamp + 1 days),
         salt: keccak256(abi.encode("private-trade", taker, allowedTaker))
       }),
-      taker: taker,
-      appData: APP_DATA
+      taker: taker
     });
   }
 
@@ -150,9 +152,18 @@ abstract contract PrivateTradeTestBase is Test {
     IConditionalOrder.ConditionalOrderParams memory makerParams,
     IConditionalOrder.ConditionalOrderParams memory takerParams
   ) internal pure returns (GPv2Trade.Data[] memory trades) {
+    trades = _tradesWithAppData(terms, makerParams, takerParams, APP_DATA);
+  }
+
+  function _tradesWithAppData(
+    PrivateTradeTerms memory terms,
+    IConditionalOrder.ConditionalOrderParams memory makerParams,
+    IConditionalOrder.ConditionalOrderParams memory takerParams,
+    bytes32 appData
+  ) internal pure returns (GPv2Trade.Data[] memory trades) {
     trades = new GPv2Trade.Data[](2);
-    trades[0] = _trade(PrivateTradeLib.makerOrder(terms), makerParams, terms.offer.maker, 0, 1);
-    trades[1] = _trade(PrivateTradeLib.takerOrder(terms), takerParams, terms.taker, 1, 0);
+    trades[0] = _trade(PrivateTradeLib.makerOrder(terms, appData), makerParams, terms.offer.maker, 0, 1, appData);
+    trades[1] = _trade(PrivateTradeLib.takerOrder(terms, appData), takerParams, terms.taker, 1, 0, appData);
   }
 
   function _trade(
@@ -161,6 +172,17 @@ abstract contract PrivateTradeTestBase is Test {
     address owner,
     uint256 sellTokenIndex,
     uint256 buyTokenIndex
+  ) internal pure returns (GPv2Trade.Data memory) {
+    return _trade(order, params, owner, sellTokenIndex, buyTokenIndex, APP_DATA);
+  }
+
+  function _trade(
+    GPv2Order.Data memory order,
+    IConditionalOrder.ConditionalOrderParams memory params,
+    address owner,
+    uint256 sellTokenIndex,
+    uint256 buyTokenIndex,
+    bytes32 appData
   ) internal pure returns (GPv2Trade.Data memory) {
     ComposableCoW.PayloadStruct memory payload =
       ComposableCoW.PayloadStruct({proof: new bytes32[](0), params: params, offchainInput: ""});
@@ -172,7 +194,7 @@ abstract contract PrivateTradeTestBase is Test {
       sellAmount: order.sellAmount,
       buyAmount: order.buyAmount,
       validTo: order.validTo,
-      appData: order.appData,
+      appData: appData,
       feeAmount: order.feeAmount,
       flags: GPv2TradeEncoder.encodeFlags(order, GPv2Signing.Scheme.Eip1271),
       executedAmount: order.sellAmount,

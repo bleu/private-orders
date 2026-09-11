@@ -35,7 +35,7 @@ library PrivateTradeLib {
   }
 
   /// @notice The order the maker must have authorised for these terms.
-  function makerOrder(PrivateTradeTerms memory terms) internal pure returns (GPv2Order.Data memory) {
+  function makerOrder(PrivateTradeTerms memory terms, bytes32 appData) internal pure returns (GPv2Order.Data memory) {
     PrivateOffer memory offer = terms.offer;
     return GPv2Order.Data({
       sellToken: IERC20(offer.sellToken),
@@ -44,7 +44,7 @@ library PrivateTradeLib {
       sellAmount: offer.sellAmount,
       buyAmount: offer.buyAmount,
       validTo: offer.validTo,
-      appData: terms.appData,
+      appData: appData,
       feeAmount: 0,
       kind: GPv2Order.KIND_SELL,
       partiallyFillable: false,
@@ -54,7 +54,7 @@ library PrivateTradeLib {
   }
 
   /// @notice The order the taker must have authorised for these terms: the mirror of the offer.
-  function takerOrder(PrivateTradeTerms memory terms) internal pure returns (GPv2Order.Data memory) {
+  function takerOrder(PrivateTradeTerms memory terms, bytes32 appData) internal pure returns (GPv2Order.Data memory) {
     PrivateOffer memory offer = terms.offer;
     return GPv2Order.Data({
       sellToken: IERC20(offer.buyToken),
@@ -63,7 +63,7 @@ library PrivateTradeLib {
       sellAmount: offer.buyAmount,
       buyAmount: offer.sellAmount,
       validTo: offer.validTo,
-      appData: terms.appData,
+      appData: appData,
       feeAmount: 0,
       kind: GPv2Order.KIND_SELL,
       partiallyFillable: false,

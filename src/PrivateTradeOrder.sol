@@ -80,7 +80,7 @@ contract PrivateTradeOrder is IConditionalOrderGenerator {
     if (owner != expectedOwner) revert PrivateTrade_OwnerRoleMismatch(role, expectedOwner, owner);
     if (terms.taker == address(0) || terms.taker == terms.offer.maker) revert PrivateTrade_BadTaker();
 
-    return _orderFor(role, terms);
+    return _orderFor(role, terms, bytes32(0));
   }
 
   /// @inheritdoc IERC165
@@ -134,14 +134,20 @@ contract PrivateTradeOrder is IConditionalOrderGenerator {
     private
     pure
   {
-    if (!PrivateTradeLib.equal(order, _orderFor(role, terms))) revert PrivateTrade_OrderMismatch(0);
+    if (!PrivateTradeLib.equal(order, _orderFor(role, terms, order.appData))) {
+      revert PrivateTrade_OrderMismatch(0);
+    }
   }
 
-  function _orderFor(PrivateTradeRole role, PrivateTradeTerms memory terms)
+  /// @dev `appData` comes from the order being validated, so this compares every field except
+  /// appData. AppData agreement between the two orders is enforced by the wrapper.
+  function _orderFor(PrivateTradeRole role, PrivateTradeTerms memory terms, bytes32 appData)
     private
     pure
     returns (GPv2Order.Data memory)
   {
-    return role == PrivateTradeRole.Maker ? PrivateTradeLib.makerOrder(terms) : PrivateTradeLib.takerOrder(terms);
+    return role == PrivateTradeRole.Maker
+      ? PrivateTradeLib.makerOrder(terms, appData)
+      : PrivateTradeLib.takerOrder(terms, appData);
   }
 }
