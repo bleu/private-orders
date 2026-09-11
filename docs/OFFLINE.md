@@ -1,4 +1,39 @@
-# Running the offline end-to-end check
+# Running the end-to-end checks
+
+Two paths, both exercised against real deployments:
+
+| Path | Command | Needs |
+| --- | --- | --- |
+| Mainnet fork | `FORK_RPC=https://ethereum-rpc.publicnode.com forge test --match-path 'test/fork/*' -vv` | Network only |
+| Offline stack | `./scripts/offline-e2e.sh` | Docker, ~25 GB free, one Dockerfile patch |
+
+Both run the same `PrivateTradeE2EBase` flow: two EOAs own their orders through CoW Sheds, and one
+settlement exchanges the two assets atomically. Each also asserts the negative case — the same pair
+submitted directly to `GPv2Settlement` is refused.
+
+The fork path is the cheaper one and needs no patching. Use the offline stack when you need the
+orderbook, autopilot and driver in the loop.
+
+## Mainnet fork
+
+Real `GPv2Settlement` (`0x9008…ab41`), real `GPv2AllowListAuthentication` (the test allowlists the
+wrapper by impersonating the manager), real `ComposableCoW`, real `COWShedFactoryForComposableCoW`
+at `0x5E284e80F3bd6A7D80A8500D9c49878028110848`, and real USDC/DAI seeded with `deal`.
+
+## Offline stack notes
+
+Two things about the offline stack are worth knowing before you debug it:
+
+- **It deploys the plain `COWShed`, not `COWShedForComposableCoW`.** That implementation has no
+  `isValidSignature`, so a Shed there cannot own a ComposableCoW order. The test deploys the
+  ComposableCoW variant itself; the factory is permissionless.
+- **Its deployed Shed is version 2.0.0**, while the current `cow-shed` is 2.1.0, and the version is
+  inside the EIP-712 domain. Signing with the wrong version fails as `InvalidSignature()`. The test
+  reads `VERSION()` from the deployed implementation instead of hardcoding it.
+
+Also: the stack's `db` service publishes host port 5432, which collides with any local Postgres.
+Set `PORT_DB=5433` in the offline repo's `.env`.
+
 
 This runs a private trade against the live `bleu/cow-offline-mode` chain: the real `GPv2Settlement`,
 the real `COWShedFactory` and `COWShedForComposableCoW`, and the real mintable test tokens the
