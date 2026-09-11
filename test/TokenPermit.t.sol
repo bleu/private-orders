@@ -4,6 +4,7 @@ pragma solidity >=0.8.0 <0.9.0;
 import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 import {TokenPermit} from "../src/libraries/TokenPermit.sol";
 import {TestERC20} from "./utils/TestERC20.sol";
@@ -76,6 +77,11 @@ contract EagerWriteToken is ERC20 {
     require(deadline >= block.timestamp, "Eager/expired");
     _approve(owner, spender, value);
   }
+}
+
+/// @dev Implements EIP-2612, but computes its DOMAIN_SEPARATOR from a name it does not report.
+contract LyingDomainToken is ERC20Permit {
+  constructor() ERC20("Honest", "HON") ERC20Permit("Dishonest") {}
 }
 
 /// @notice `TokenPermit` is only useful if its encoding actually works against real tokens, so every
@@ -177,6 +183,91 @@ contract TokenPermitTest is Test {
     TokenPermit.Permit memory permit = TokenPermit.build(address(eager), owner, shed, AMOUNT, DEADLINE);
     assertEq(uint256(permit.kind), uint256(TokenPermit.Kind.None));
     assertEq(TokenPermit.digest(permit), bytes32(0));
+  }
+
+  /// @dev Typed data is a presentation of the message, so it has to describe the *same* message. The
+  /// type strings a wallet reads are written out here and compared against the constants the digest
+  /// hashes, which is what catches the two drifting apart.
+  function test_typedDataTypeStringsAreTheOnesTheDigestHashes() public view {
+    TokenPermit.Permit memory permit = TokenPermit.build(address(eip2612), owner, shed, AMOUNT, DEADLINE);
+    assertTrue(TokenPermit.typedDataAvailable(permit), "the domain fields must reproduce the token's");
+
+    string memory json = TokenPermit.typedData(permit);
+
+    // The EIP-2612 struct, spelled exactly as the wallet will hash it.
+    string memory permitType = "Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)";
+    assertEq(keccak256(bytes(permitType)), TokenPermit.EIP2612_TYPEHASH);
+    assertTrue(_contains(json, "\"primaryType\":\"Permit\""));
+    // The JSON-RPC form lists the fields; the type string is their concatenation, so checking the
+    // ordered pairs is the same statement in the shape a wallet actually reads.
+    assertTrue(
+      _contains(
+        json,
+        '{"name":"owner","type":"address"},{"name":"spender","type":"address"},'
+        '{"name":"value","type":"uint256"},{"name":"nonce","type":"uint256"},' '{"name":"deadline","type":"uint256"}'
+      )
+    );
+
+    // The domain fields, and the values the wallet shows its owner.
+    assertTrue(_contains(json, eip2612.name()));
+    // OpenZeppelin's ERC20Permit exposes no `version()`, so this is the candidate that reproduces
+    // its DOMAIN_SEPARATOR rather than a value read from the token.
+    assertTrue(_contains(json, "\"version\":\"1\""));
+    // Lowercase hex, as the JSON-RPC form uses and as the library emits.
+    assertTrue(_contains(json, Strings.toHexString(address(eip2612))));
+    assertTrue(_contains(json, Strings.toHexString(owner)));
+    assertTrue(_contains(json, Strings.toHexString(shed)));
+    assertTrue(_contains(json, Strings.toString(AMOUNT)));
+    assertTrue(_contains(json, Strings.toString(DEADLINE)));
+  }
+
+  /// @dev DAI's struct has different field names, and a wallet shows them as written.
+  function test_daiStyleTypedDataUsesDaisFieldNames() public view {
+    TokenPermit.Permit memory permit = TokenPermit.build(address(daiLike), owner, shed, AMOUNT, DEADLINE);
+    assertTrue(TokenPermit.typedDataAvailable(permit));
+    assertEq(permit.version, "1", "DAI's own version string");
+
+    string memory json = TokenPermit.typedData(permit);
+
+    string memory permitType = "Permit(address holder,address spender,uint256 nonce,uint256 expiry,bool allowed)";
+    assertEq(keccak256(bytes(permitType)), TokenPermit.DAI_TYPEHASH);
+    assertTrue(
+      _contains(
+        json,
+        '{"name":"holder","type":"address"},{"name":"spender","type":"address"},'
+        '{"name":"nonce","type":"uint256"},{"name":"expiry","type":"uint256"},' '{"name":"allowed","type":"bool"}'
+      )
+    );
+    assertTrue(_contains(json, "\"holder\""));
+    assertTrue(_contains(json, "\"expiry\""));
+    assertTrue(_contains(json, "\"allowed\":true"));
+  }
+
+  /// @dev A token whose domain fields do not reproduce its own DOMAIN_SEPARATOR cannot be offered
+  /// typed data: the wallet would sign a digest the token never checks.
+  function test_tokenWhoseDomainFieldsDontMatchIsNotOfferedTypedData() public {
+    LyingDomainToken liar = new LyingDomainToken();
+    TokenPermit.Permit memory permit = TokenPermit.build(address(liar), owner, shed, AMOUNT, DEADLINE);
+
+    assertEq(uint256(permit.kind), uint256(TokenPermit.Kind.Eip2612), "it does implement permit");
+    assertFalse(TokenPermit.typedDataAvailable(permit), "but its domain fields do not match");
+  }
+
+  function _contains(string memory haystack, string memory needle) private pure returns (bool) {
+    bytes memory h = bytes(haystack);
+    bytes memory n = bytes(needle);
+    if (n.length > h.length) return false;
+    for (uint256 i = 0; i <= h.length - n.length; ++i) {
+      bool matched = true;
+      for (uint256 j = 0; j < n.length; ++j) {
+        if (h[i + j] != n[j]) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) return true;
+    }
+    return false;
   }
 
   function _submitAsRelayer(address token, TokenPermit.Permit memory permit) private {

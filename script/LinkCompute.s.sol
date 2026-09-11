@@ -127,6 +127,10 @@ contract LinkCompute is Script {
     json = string.concat(json, '","createCall":"', vm.toString(calls[request.fund ? 2 : 1].callData));
     json = string.concat(json, _permitJson(sellToken, owner, shed, sellAmount, deadline));
     // `permitNonce` is a number, so the next fragment opens with a comma rather than a closing quote.
+    // The same message as typed data, so a wallet can show the calls instead of a bare digest.
+    json = string.concat(
+      json, ',"bundleTypedData":', ShedBundle.typedData(request.shedFactory, shed, calls, nonce, deadline)
+    );
     json = string.concat(json, ',"digest":"');
     json = string.concat(json, vm.toString(_digest(request, shed, calls, nonce, deadline)));
     json = string.concat(json, '"}');
@@ -144,6 +148,14 @@ contract LinkCompute is Script {
     json = string.concat('","permitKind":"', _permitKind(permit.kind));
     json = string.concat(json, '","permitDigest":"', vm.toString(TokenPermit.digest(permit)));
     json = string.concat(json, '","permitNonce":', vm.toString(permit.nonce));
+    // Typed data only when the token's domain fields provably reproduce its own DOMAIN_SEPARATOR,
+    // so a wallet cannot be shown a digest the token would reject.
+    // `permitNonce` is a number, so this fragment opens with a comma, not a closing quote.
+    json =
+      string.concat(json, ',"permitTypedDataAvailable":', TokenPermit.typedDataAvailable(permit) ? "true" : "false");
+    if (TokenPermit.typedDataAvailable(permit)) {
+      json = string.concat(json, ',"permitTypedData":', TokenPermit.typedData(permit));
+    }
   }
 
   function _permitKind(TokenPermit.Kind kind) private pure returns (string memory) {

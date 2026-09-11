@@ -23,6 +23,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+import { render } from './page.mjs';
+
 const PORT = Number(process.env.PORT ?? 9200);
 const ROOT = process.env.PRIVATE_TRADE_ROOT ?? path.resolve(import.meta.dirname, '..');
 const RPC = process.env.RPC ?? 'http://localhost:8545';
@@ -134,6 +136,22 @@ async function orderStatus(uid) {
   }
 }
 
+/// Symbol and decimals, read once per token and kept on the offer. Raw amounts are unreadable —
+/// `100000000` is not a price — and a client should never be the one to guess a token's decimals.
+function tokenMeta(offer, token) {
+  offer.tokens ??= {};
+  const key = token.toLowerCase();
+  if (!offer.tokens[key]) {
+    offer.tokens[key] = {
+      address: token,
+      // `cast` returns a string return value quoted.
+      symbol: cast(['call', token, 'symbol()(string)', '--rpc-url', RPC]).trim().replace(/^"|"$/g, ''),
+      decimals: Number(cast(['call', token, 'decimals()(uint8)', '--rpc-url', RPC]).split(' ')[0]),
+    };
+  }
+  return offer.tokens[key];
+}
+
 const balanceOf = (token, holder) =>
   cast(['call', token, 'balanceOf(address)(uint256)', holder, '--rpc-url', RPC]).split(' ')[0];
 
@@ -180,30 +198,24 @@ const funding = (computed, role) => {
   };
 };
 
-const page = (offer, computed) => `<!doctype html>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Private trade</title>
-<style>
- body{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem;color:#111}
- h1{font-size:1.25rem;margin-bottom:.25rem} .muted{color:#666;font-size:.9rem}
- table{width:100%;border-collapse:collapse;margin:1.5rem 0}
- td{padding:.4rem 0;border-bottom:1px solid #eee} td:last-child{text-align:right;font-variant-numeric:tabular-nums}
- code{background:#f4f4f4;padding:.15rem .35rem;border-radius:4px;font-size:.85rem;word-break:break-all}
- .status{display:inline-block;padding:.15rem .5rem;border-radius:999px;background:#e8f5e9;color:#1b5e20;font-size:.8rem}
-</style>
-<h1>Private trade</h1>
-<p class="muted">Link <code>${offer.id}</code> · <span class="status">${offer.status ?? 'open'}</span></p>
-<table>
- <tr><td>You receive</td><td><b>${computed.buyAmount}</b> <code>${computed.buyToken}</code></td></tr>
- <tr><td>You pay</td><td><b>${computed.sellAmount}</b> <code>${computed.sellToken}</code></td></tr>
- <tr><td>Counterparty</td><td><code>${computed.makerShed}</code></td></tr>
- <tr><td>Expires</td><td>${new Date(Number(computed.validTo) * 1000).toISOString()}</td></tr>
-</table>
-<p class="muted">Sign the digest below with the wallet that owns your Shed, and the permit digest if
- there is one, then <code>POST /offers/${offer.id}/accept</code> with
- <code>{"signature":"0x…","permitSignature":"0x…"}</code>. The signature funds your Shed and authorises the
- order; where the token supports permit the relayer submits that too, so you need no transaction.</p>
-<p><code>${computed.takerBundle.digest}</code></p>`;
+/// The terms, with amounts already scaled. No addresses: this view answers to whoever holds the link.
+const publicTerms = (offer) => {
+  const computed = offer.computed;
+  const sell = tokenMeta(offer, computed.sellToken);
+  const buy = tokenMeta(offer, computed.buyToken);
+  return {
+    sellToken: computed.sellToken,
+    sellAmount: computed.sellAmount,
+    sellSymbol: sell.symbol,
+    sellDecimals: sell.decimals,
+    buyToken: computed.buyToken,
+    buyAmount: computed.buyAmount,
+    buySymbol: buy.symbol,
+    buyDecimals: buy.decimals,
+    validTo: Number(computed.validTo),
+    expiresAt: new Date(Number(computed.validTo) * 1000).toISOString(),
+  };
+};
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -260,26 +272,53 @@ const server = http.createServer(async (req, res) => {
       const offer = loadOffer(parts[1]);
       if (!offer) return json(res, 404, { error: 'unknown offer' });
 
+      if (req.method === 'GET' && parts[2] === 'role') {
+        const who = (url.searchParams.get('address') ?? '').toLowerCase();
+        if (!/^0x[0-9a-f]{40}$/.test(who)) return json(res, 400, { error: 'an address query parameter is required' });
+
+        const maker = offer.computed.maker.toLowerCase();
+        const taker = offer.request.taker.toLowerCase();
+        const role = who === maker ? 'maker' : who === taker ? 'taker' : null;
+        if (!role) return json(res, 200, { role: null, terms: publicTerms(offer) });
+
+        const side = role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
+        return json(res, 200, {
+          role,
+          terms: publicTerms(offer),
+          // Only a party learns who the other one is. The link itself is a bearer token, and the Shed
+          // is derivable from its owner, so publishing it would publish the maker's address to
+          // anyone holding the link.
+          counterparty: role === 'taker' ? offer.computed.makerShed : offer.computed.takerBundle.shed,
+          bundle: { digest: side.digest, typedData: side.bundleTypedData, deadline: Number(side.deadline) },
+          permit: {
+            kind: side.permitKind,
+            digest: side.permitDigest,
+            typedData: side.permitTypedData ?? null,
+            typedDataAvailable: side.permitTypedDataAvailable === true,
+            token: side.sellToken,
+            amount: side.sellAmount,
+            symbol: tokenMeta(offer, side.sellToken).symbol,
+            decimals: tokenMeta(offer, side.sellToken).decimals,
+            spender: side.shed,
+            deadline: Number(side.deadline),
+          },
+          funding: funding(offer.computed, role),
+          balance: balanceOf(side.sellToken, who),
+          signed: offer.signatures?.[role] !== undefined,
+          makerSigned: offer.signatures?.maker !== undefined,
+          orderUid: offer.orderUid ?? null,
+        });
+      }
+
       if (req.method === 'GET' && parts.length === 2) {
         return json(res, 200, {
           id: offer.id,
           status: (await status(offer)).status,
-          terms: {
-            sellToken: offer.computed.sellToken,
-            sellAmount: offer.computed.sellAmount,
-            buyToken: offer.computed.buyToken,
-            buyAmount: offer.computed.buyAmount,
-            makerShed: offer.computed.makerShed,
-            validTo: offer.computed.validTo,
-          },
-          takerBundle: {
-            shed: offer.computed.takerBundle.shed,
-            nonce: offer.computed.takerBundle.nonce,
-            deadline: offer.computed.takerBundle.deadline,
-            digest: offer.computed.takerBundle.digest,
-          },
-          funding: funding(offer.computed, 'taker'),
-          permitRequired: offer.computed.takerBundle.permitKind !== 'none',
+          terms: publicTerms(offer),
+          // Whether the counterparty has signed is not secret, and a taker waiting on a maker needs
+          // to know it. Which addresses those are is not part of this view.
+          makerSigned: offer.signatures?.maker !== undefined,
+          takerSigned: offer.signatures?.taker !== undefined,
           orderUid: offer.orderUid ?? null,
         });
       }
@@ -356,7 +395,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && parts[0] === 'o' && parts[1]) {
       const offer = loadOffer(parts[1]);
       if (!offer) return json(res, 404, { error: 'unknown offer' });
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(page(offer, offer.computed));
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(render(offer.id));
       return;
     }
 

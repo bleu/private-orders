@@ -6,6 +6,7 @@ import {ComposableCoW} from "composable-cow/ComposableCoW.sol";
 import {IConditionalOrder} from "composable-cow/interfaces/IConditionalOrder.sol";
 import {Call} from "cow-shed/ICOWAuthHook.sol";
 import {COWShedFactory} from "cow-shed/COWShedFactory.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 interface IShedVersion {
   function VERSION() external view returns (string memory);
@@ -71,6 +72,19 @@ library ShedBundle {
     return keccak256(abi.encode(EIP712_DOMAIN_TYPE_HASH, keccak256("COWShed"), version, block.chainid, shed));
   }
 
+  /// @notice The domain fields as typed data would carry them, for a client that needs to display
+  /// them. `shedVersion` is read from the deployed implementation, never hardcoded.
+  function domain(address shedFactory, address shed)
+    internal
+    view
+    returns (string memory name, string memory version, uint256 chainId, address verifyingContract)
+  {
+    name = "COWShed";
+    version = IShedVersion(COWShedFactory(shedFactory).implementation()).VERSION();
+    chainId = block.chainid;
+    verifyingContract = shed;
+  }
+
   function structHash(Call[] memory bundleCalls, bytes32 nonce, uint256 deadline) internal pure returns (bytes32) {
     bytes32[] memory hashes = new bytes32[](bundleCalls.length);
     for (uint256 i = 0; i < bundleCalls.length; ++i) {
@@ -99,6 +113,61 @@ library ShedBundle {
     );
   }
 
+  /// @notice The bundle as EIP-712 typed data, so a wallet shows what it is signing instead of
+  /// asking its owner to blind-sign a 32-byte digest.
+  ///
+  /// @dev This is a presentation of the same message, not a second definition of it: every type
+  /// string here is the one `structHash` hashes. `script/LinkServiceE2E`-style checks compare a
+  /// signature over this JSON against a signature over `digest` and require them to be equal, which
+  /// is what catches the two drifting apart.
+  ///
+  /// `EIP712Domain` is deliberately absent from `types`: the spec puts the domain in its own field,
+  /// and wallets derive the domain type from it.
+  function typedData(address shedFactory, address shed, Call[] memory bundleCalls, bytes32 nonce, uint256 deadline)
+    internal
+    view
+    returns (string memory json)
+  {
+    json = string.concat(
+      '{"primaryType":"ExecuteHooks","domain":{"name":"COWShed","version":"',
+      IShedVersion(COWShedFactory(shedFactory).implementation()).VERSION()
+    );
+    json = string.concat(json, '","chainId":', Strings.toString(block.chainid));
+    json = string.concat(json, ',"verifyingContract":"', Strings.toHexString(shed), '"}');
+    json = string.concat(
+      json,
+      ',"types":{',
+      '"ExecuteHooks":[{"name":"calls","type":"Call[]"},{"name":"nonce","type":"bytes32"},',
+      '{"name":"deadline","type":"uint256"}],',
+      '"Call":[{"name":"target","type":"address"},{"name":"value","type":"uint256"},',
+      '{"name":"callData","type":"bytes"},{"name":"allowFailure","type":"bool"},',
+      '{"name":"isDelegateCall","type":"bool"}]},',
+      '"message":{"calls":['
+    );
+
+    for (uint256 i = 0; i < bundleCalls.length; ++i) {
+      if (i > 0) json = string.concat(json, ",");
+      json = string.concat(
+        json,
+        '{"target":"',
+        Strings.toHexString(bundleCalls[i].target),
+        '","value":"',
+        Strings.toString(bundleCalls[i].value),
+        '","callData":"',
+        _hex(bundleCalls[i].callData),
+        '","allowFailure":',
+        bundleCalls[i].allowFailure ? "true" : "false",
+        ',"isDelegateCall":',
+        bundleCalls[i].isDelegateCall ? "true" : "false",
+        "}"
+      );
+    }
+
+    json = string.concat(
+      json, '],"nonce":"', Strings.toHexString(uint256(nonce), 32), '","deadline":"', Strings.toString(deadline), '"}}'
+    );
+  }
+
   function digest(Bundle memory bundle_, address shedFactory) internal view returns (bytes32) {
     return digest(shedFactory, bundle_.shed, bundle_.calls, bundle_.nonce, bundle_.deadline);
   }
@@ -106,6 +175,20 @@ library ShedBundle {
   /// @notice Recover the signer of a 65-byte `r || s || v` signature over the bundle digest.
   /// @dev Returns `address(0)` for a malformed signature. Used to fail with a reason the caller can
   /// act on, instead of the Shed's opaque `InvalidSignature()`.
+  /// @dev `Strings` has no bytes overload in this vendored version, and calldata is what a wallet
+  /// needs to display most of all.
+  function _hex(bytes memory data) private pure returns (string memory) {
+    bytes memory alphabet = "0123456789abcdef";
+    bytes memory out = new bytes(2 + data.length * 2);
+    out[0] = "0";
+    out[1] = "x";
+    for (uint256 i = 0; i < data.length; ++i) {
+      out[2 + i * 2] = alphabet[uint8(data[i] >> 4)];
+      out[3 + i * 2] = alphabet[uint8(data[i] & 0x0f)];
+    }
+    return string(out);
+  }
+
   function recover(Bundle memory bundle_, address shedFactory, bytes memory signature) internal view returns (address) {
     if (signature.length != 65) return address(0);
     bytes32 r;

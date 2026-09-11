@@ -111,10 +111,24 @@ MAKER_NONCE=$(cast nonce "${MAKER}" --rpc-url "${RPC}")
 cast send "${USDC_ADDRESS}" "mint(address,uint256)" "${MAKER}" 100000000 \
   --private-key "${ANVIL_KEY_0}" --rpc-url "${RPC}" >/dev/null
 
+# The typed data is what a wallet signs, so it has to be the same message as the digest. This is
+# checked by signing both and requiring byte-identical signatures — not by trusting the JSON.
+typed_data() { python3 -c "import json,sys;d=json.load(open('out-json/link-computed.json'));print(json.dumps(d[sys.argv[1]][sys.argv[2]]))" "$1" "$2"; }
+signs_alike() {
+  local typed=$1 digest=$2 key=$3 label=$4
+  echo "${typed}" > /tmp/typed-data.json
+  local a b
+  a=$(cast wallet sign --data --from-file /tmp/typed-data.json --private-key "${key}")
+  b=$(cast wallet sign --no-hash --private-key "${key}" "${digest}")
+  [ "${a}" = "${b}" ] || { echo "FAILED: the typed data for the ${label} is not the same message as its digest" >&2; exit 1; }
+}
+
 log "maker signs the bundle and the permit — no transaction"
 echo "   permit: $(echo "${OFFER}" | jqq "d['funding']['kind']")"
 MAKER_DIGEST=$(echo "${OFFER}" | jqq "d['makerBundle']['digest']")
 MAKER_PERMIT=$(echo "${OFFER}" | jqq "d['funding']['digest']")
+signs_alike "$(typed_data makerBundle bundleTypedData)" "${MAKER_DIGEST}" "${MAKER_KEY}" "maker's bundle"
+signs_alike "$(typed_data makerBundle permitTypedData)" "${MAKER_PERMIT}" "${MAKER_KEY}" "maker's permit"
 MAKER_SIG=$(cast wallet sign --no-hash --private-key "${MAKER_KEY}" "${MAKER_DIGEST}")
 MAKER_PERMIT_SIG=$(cast wallet sign --no-hash --private-key "${MAKER_KEY}" "${MAKER_PERMIT}")
 curl -fsS -X POST "${SERVICE}/offers/${OFFER_ID}/signature" -H 'content-type: application/json' \
@@ -123,13 +137,16 @@ curl -fsS -X POST "${SERVICE}/offers/${OFFER_ID}/signature" -H 'content-type: ap
 # --- 4. the taker opens the link and accepts -----------------------------------------------------
 
 log "taker opens the link"
-VIEW=$(curl -fsS "${SERVICE}/offers/${OFFER_ID}")
-TAKER_SHED=$(echo "${VIEW}" | jqq "d['takerBundle']['shed']")
-TAKER_DIGEST=$(echo "${VIEW}" | jqq "d['takerBundle']['digest']")
-echo "   taker pays $(echo "${VIEW}" | jqq "d['terms']['sellAmount']") for $(echo "${VIEW}" | jqq "d['terms']['buyAmount']")"
+# The public view carries no addresses; a party asks for its own side by address.
+VIEW=$(curl -fsS "${SERVICE}/offers/${OFFER_ID}/role?address=${TAKER}")
+TAKER_SHED=$(echo "${VIEW}" | jqq "d['permit']['spender']")
+TAKER_DIGEST=$(echo "${VIEW}" | jqq "d['bundle']['digest']")
+echo "   role: $(echo "${VIEW}" | jqq "d['role']")"
+echo "   taker pays $(echo "${VIEW}" | jqq "d['terms']['buyAmount']") $(echo "${VIEW}" | jqq "d['terms']['buySymbol']")" \
+     "for $(echo "${VIEW}" | jqq "d['terms']['sellAmount']") $(echo "${VIEW}" | jqq "d['terms']['sellSymbol']")"
 
 log "taker signs the bundle and the permit — no transaction"
-echo "   permit: $(echo "${VIEW}" | jqq "d['funding']['kind']")"
+echo "   permit: $(echo "${VIEW}" | jqq "d['permit']['kind']")"
 cast send "${DAI_ADDRESS}" "mint(address,uint256)" "${TAKER}" 100000000000000000000 \
   --private-key "${ANVIL_KEY_0}" --rpc-url "${RPC}" >/dev/null
 reset_allowance "${DAI_ADDRESS}" "${TAKER}" "${TAKER_SHED}"
@@ -139,6 +156,8 @@ TAKER_PERMIT=$(echo "${VIEW}" | jqq "d['funding']['digest']")
 read -r M0 MD0 T0 TU0 <<< "$(snapshot)"
 
 log "taker accepts"
+signs_alike "$(typed_data takerBundle bundleTypedData)" "${TAKER_DIGEST}" "${TAKER_KEY}" "taker's bundle"
+signs_alike "$(typed_data takerBundle permitTypedData)" "${TAKER_PERMIT}" "${TAKER_KEY}" "taker's permit"
 TAKER_SIG=$(cast wallet sign --no-hash --private-key "${TAKER_KEY}" "${TAKER_DIGEST}")
 TAKER_PERMIT_SIG=$(cast wallet sign --no-hash --private-key "${TAKER_KEY}" "${TAKER_PERMIT}")
 ACCEPT=$(curl -fsS -X POST "${SERVICE}/offers/${OFFER_ID}/accept" -H 'content-type: application/json' \

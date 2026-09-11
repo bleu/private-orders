@@ -2,6 +2,7 @@
 pragma solidity >=0.8.0 <0.9.0;
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 /// @title TokenPermit
 /// @notice `permit` support, so a party funds their Shed with a signature instead of a transaction.
@@ -31,6 +32,11 @@ library TokenPermit {
     bytes4(keccak256("permit(address,address,uint256,uint256,bool,uint8,bytes32,bytes32)"));
   bytes4 internal constant DOMAIN_SEPARATOR_SELECTOR = bytes4(keccak256("DOMAIN_SEPARATOR()"));
   bytes4 internal constant NONCES_SELECTOR = bytes4(keccak256("nonces(address)"));
+  bytes4 internal constant NAME_SELECTOR = bytes4(keccak256("name()"));
+  bytes4 internal constant VERSION_SELECTOR = bytes4(keccak256("version()"));
+
+  bytes32 internal constant EIP712_DOMAIN_TYPE_HASH =
+    keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
   bytes32 internal constant EIP2612_TYPEHASH =
     keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
@@ -53,6 +59,9 @@ library TokenPermit {
     uint256 deadline;
     bool allowed;
     bytes32 domainSeparator;
+    /// @dev The domain fields, read from the token. Used to present the permit as typed data.
+    string name;
+    string version;
   }
 
   /// @notice Which `permit` shape, if any, a token implements.
@@ -87,6 +96,119 @@ library TokenPermit {
     permit.deadline = deadline;
     permit.allowed = true;
     permit.domainSeparator = domainSeparator(token);
+    permit.name = name(token);
+    permit.version = _resolveVersion(token, permit.name, permit.domainSeparator, version(token));
+  }
+
+  /// @dev EIP-712 domains carry a version string, and many tokens do not expose it — the `version()`
+  /// getter is a convention, not part of the standard, so a token built on OpenZeppelin's
+  /// `ERC20Permit` has none. Rather than give up on typed data for those, candidate versions are
+  /// tried against the token's own `DOMAIN_SEPARATOR()`. Only a version that actually reproduces it
+  /// is used, so this is a lookup rather than a guess, and a token that matches none gets no typed
+  /// data at all.
+  function _resolveVersion(address token, string memory tokenName, bytes32 separator, string memory declared)
+    private
+    view
+    returns (string memory)
+  {
+    if (bytes(declared).length > 0 && _separatorFor(token, tokenName, declared) == separator) return declared;
+
+    string[5] memory candidates = ["1", "2", "3", "4", ""];
+    for (uint256 i = 0; i < candidates.length; ++i) {
+      if (_separatorFor(token, tokenName, candidates[i]) == separator) return candidates[i];
+    }
+    return "";
+  }
+
+  function _separatorFor(address token, string memory tokenName, string memory version_)
+    private
+    view
+    returns (bytes32)
+  {
+    return keccak256(
+      abi.encode(EIP712_DOMAIN_TYPE_HASH, keccak256(bytes(tokenName)), keccak256(bytes(version_)), block.chainid, token)
+    );
+  }
+
+  /// @notice Whether this permit can be shown to a wallet as typed data.
+  ///
+  /// @dev Typed data is built from the domain fields, and the wallet hashes what it is shown. If
+  /// those fields do not reproduce the token's own `DOMAIN_SEPARATOR()`, the signature would be over
+  /// a different digest than the token checks, and the permit would simply fail. A token that hides
+  /// its name or version, or computes its domain some other way, is therefore not offered typed data
+  /// at all; the caller signs the raw digest instead.
+  function typedDataAvailable(Permit memory permit) internal view returns (bool) {
+    if (permit.kind == Kind.None) return false;
+    if (bytes(permit.name).length == 0 || bytes(permit.version).length == 0) return false;
+    return domainSeparatorFromFields(permit) == permit.domainSeparator;
+  }
+
+  /// @notice The permit as EIP-712 typed data, so a wallet displays the amount and spender instead
+  /// of a bare digest. Only valid when `typedDataAvailable` holds.
+  function typedData(Permit memory permit) internal view returns (string memory json) {
+    json = string.concat(
+      '{"primaryType":"Permit","domain":{"name":"',
+      permit.name,
+      '","version":"',
+      permit.version,
+      '","chainId":',
+      Strings.toString(block.chainid),
+      ',"verifyingContract":"',
+      Strings.toHexString(permit.token),
+      '"},"types":{"Permit":['
+    );
+
+    if (permit.kind == Kind.Eip2612) {
+      json = string.concat(
+        json,
+        '{"name":"owner","type":"address"},{"name":"spender","type":"address"},',
+        '{"name":"value","type":"uint256"},{"name":"nonce","type":"uint256"},',
+        '{"name":"deadline","type":"uint256"}]},"message":{',
+        '"owner":"',
+        Strings.toHexString(permit.owner),
+        '","spender":"',
+        Strings.toHexString(permit.spender),
+        '","value":"',
+        Strings.toString(permit.amount),
+        '","nonce":"',
+        Strings.toString(permit.nonce),
+        '","deadline":"',
+        Strings.toString(permit.deadline),
+        '"}}'
+      );
+      return json;
+    }
+
+    json = string.concat(
+      json,
+      '{"name":"holder","type":"address"},{"name":"spender","type":"address"},',
+      '{"name":"nonce","type":"uint256"},{"name":"expiry","type":"uint256"},',
+      '{"name":"allowed","type":"bool"}]},"message":{',
+      '"holder":"',
+      Strings.toHexString(permit.owner),
+      '","spender":"',
+      Strings.toHexString(permit.spender),
+      '","nonce":"',
+      Strings.toString(permit.nonce),
+      '","expiry":"',
+      Strings.toString(permit.deadline),
+      '","allowed":',
+      permit.allowed ? "true" : "false",
+      "}}"
+    );
+  }
+
+  /// @dev The domain separator the given fields imply. Compared against the token's own.
+  function domainSeparatorFromFields(Permit memory permit) internal view returns (bytes32) {
+    return keccak256(
+      abi.encode(
+        EIP712_DOMAIN_TYPE_HASH,
+        keccak256(bytes(permit.name)),
+        keccak256(bytes(permit.version)),
+        block.chainid,
+        permit.token
+      )
+    );
   }
 
   /// @notice The digest a party signs. Zero if the token has no permit support.
@@ -140,6 +262,22 @@ library TokenPermit {
     (bool ok, bytes memory data) = token.staticcall(abi.encodeWithSelector(DOMAIN_SEPARATOR_SELECTOR));
     if (!ok || data.length < 32) return bytes32(0);
     separator = abi.decode(data, (bytes32));
+  }
+
+  /// @notice The token's `name()`, empty when it does not expose one as a string.
+  function name(address token) internal view returns (string memory value) {
+    value = _string(token, NAME_SELECTOR);
+  }
+
+  /// @notice The token's `version()`, the field EIP-712 domains use for the permit revision.
+  function version(address token) internal view returns (string memory value) {
+    value = _string(token, VERSION_SELECTOR);
+  }
+
+  function _string(address token, bytes4 selector) private view returns (string memory value) {
+    (bool ok, bytes memory data) = token.staticcall(abi.encodeWithSelector(selector));
+    if (!ok || data.length < 64) return "";
+    value = abi.decode(data, (string));
   }
 
   /// @notice The owner's current permit nonce, for a DAI-style token.
