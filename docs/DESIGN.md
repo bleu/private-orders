@@ -32,6 +32,32 @@ front of `GPv2Settlement.settle`. During that call it publishes `activeOfferId` 
 Conditions 3 and 4 are the pair binding. Outside the wrapper's window `activeOfferId` is zero and
 every order reverts.
 
+## Fitting into Atomic Bundles
+
+The wrapper is a CoW Atomic Bundle rather than a bespoke settlement entry point, so it inherits the
+framework's entry point (`wrappedSettle(settleData, chainedWrapperData)`), its chained encoding, its
+solver authentication, and its allowlist.
+
+Three framework properties changed the design:
+
+**The bundle must be last in the chain.** CoW's own documentation is explicit that `settleData` can
+be rewritten by an intermediate bundle, and that validating it is therefore only meaningful when
+nothing runs afterwards. The wrapper reverts unless `remainingWrapperData` is empty, which makes the
+calldata it validated exactly the calldata `GPv2Settlement.settle` receives. Without that rule, a
+later bundle could resize amounts or add an interaction after the checks passed.
+
+**`wrapperData` is untrusted.** It is normally carried in the order's appData, which is aggregated by
+the driver from a document it does not hash on-chain. Nothing in it is believed: the wrapper checks
+it internally, and the orders re-check the published terms against the offer each party authorised
+in ComposableCoW. A tampered `allowedTaker` produces a different `offerId` and the maker's own order
+stops validating.
+
+**The pair binding does not live in appData.** It would be tempting to bind the terms by making
+`order.appData` the hash of the terms. It cannot work: GPv2's `appData` field must hash to the appData
+document the orderbook stores, and that document cannot be reconstructed on-chain for arbitrary
+terms. The binding therefore stays where it is enforceable — in the conditional order's `staticInput`,
+which ComposableCoW hashes into the order's identity, plus the wrapper's published context.
+
 ## Why the maker does not commit to the taker's order hash
 
 The obvious construction is mutual commitment: Alice's order commits to Bob's order UID, Bob's to
@@ -92,3 +118,7 @@ maker" pattern BYOS already anticipates.
    hook or an escrow leg.
 5. **Driver semantics.** Whether the driver will accept a settlement containing two contract orders
    and no auction is still open, and is the next thing to test against `cow-offline-mode`.
+6. **Composition with other bundles.** Requiring "last in the chain" is what makes the calldata
+   check meaningful, but it means a private trade cannot currently be combined with a bundle that
+   needs to run inside it. A pre-settlement funding bundle chained *before* the wrapper would work;
+   one that must run after the settlement would not.
