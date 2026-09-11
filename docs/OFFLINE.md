@@ -29,6 +29,46 @@ The first start builds the Rust workspace from `modules/services`, which dominat
 delete it, the container needs internet plus a working mainnet RPC (`MAINNET_RPC_URL`), because it
 replays mainnet bytecode onto anvil.
 
+## 1a. Required local patch to the offline repo
+
+The stack does not build unpatched. Two edits to `offline-mode/Dockerfile`:
+
+```dockerfile
+# in the cargo-build stage, replacing `rustup install stable && rustup default stable`
+ARG RUST_VERSION=1.89.0
+RUN rustup install ${RUST_VERSION} && \
+    rustup default ${RUST_VERSION}
+# modules/services/rust-toolchain pins "stable", which rustup obeys over the default above.
+# RUSTUP_TOOLCHAIN takes precedence over the toolchain file.
+ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
+```
+
+```dockerfile
+# build only what the check needs, instead of the whole workspace
+CARGO_PROFILE_RELEASE_DEBUG=1 cargo build --release \
+  -p autopilot -p driver -p orderbook -p solvers && \
+cp target/release/autopilot / && cp target/release/driver / && \
+cp target/release/orderbook / && cp target/release/solvers /
+```
+
+Why: `stable` is rustc 1.98.1, which cannot compile `alloy-signer-aws 1.1.0`
+(`error: queries overflow the depth limit`). `crates/ethrpc` enables alloy's `signer-aws` feature
+unconditionally, so dropping the `alerter` target alone does not avoid it. 1.89.0 is from the same
+era as the pinned services revision (2025-12-18).
+
+And one environment variable on the orderbook service, for the reason in
+[DESIGN.md](DESIGN.md#integrating-with-the-orderbook-and-driver):
+
+```
+EIP1271_SKIP_CREATION_VALIDATION=true
+```
+
+## 1b. Disk
+
+The Rust workspace needs **roughly 20-30 GB free**. `CARGO_PROFILE_RELEASE_DEBUG=1` inflates
+`target/` considerably. If the container runtime's disk fills during `cargo build`, the build stops
+with `Input/output error` and the runtime's own disk can be left needing a restart.
+
 ## 2. Run the check
 
 ```bash
