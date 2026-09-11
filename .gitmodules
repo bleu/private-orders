@@ -1,0 +1,13 @@
+[submodule "lib/forge-std"]
+	path = lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
+[submodule "lib/composable-cow"]
+	path = lib/composable-cow
+	url = https://github.com/cowprotocol/composable-cow
+[submodule "lib/cow-shed"]
+	path = lib/cow-shed
+	url = https://github.com/cowdao-grants/cow-shed
+[submodule "lib/cow-contracts"]
+	path = lib/cow-contracts
+	url = https://github.com/cowprotocol/contracts
+	branch = feat/wrapper

@@ -1,0 +1,28 @@
+[profile.default]
+src = 'src'
+out = 'out'
+test = 'test'
+script = 'script'
+libs = ['lib']
+solc_version = '0.8.26'
+auto_detect_solc = true
+optimizer = true
+optimizer_runs = 1000
+evm_version = 'cancun'
+via_ir = false
+
+remappings = [
+  'cowprotocol/contracts/=lib/cow-contracts/src/contracts/',
+  'composable-cow/=lib/composable-cow/src/',
+  'cow-shed/=lib/cow-shed/src/',
+  'forge-std/=lib/forge-std/src/',
+  'safe/=lib/composable-cow/lib/safe/contracts/',
+  '@openzeppelin/contracts/=lib/composable-cow/lib/@openzeppelin/contracts/',
+  'openzeppelin-contracts/contracts/=lib/cow-shed/lib/openzeppelin-contracts/contracts/',
+  'solady/=lib/cow-shed/lib/solady/src/',
+]
+
+[fmt]
+line_length = 120
+tab_width = 2
+bracket_spacing = false

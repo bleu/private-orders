@@ -1,0 +1,333 @@
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity >=0.8.0 <0.9.0;
+
+import {IERC20} from 'cowprotocol/contracts/interfaces/IERC20.sol';
+import {GPv2Trade} from 'cowprotocol/contracts/libraries/GPv2Trade.sol';
+import {GPv2Order} from 'cowprotocol/contracts/libraries/GPv2Order.sol';
+import {GPv2Interaction} from 'cowprotocol/contracts/libraries/GPv2Interaction.sol';
+import {GPv2Signing} from 'cowprotocol/contracts/mixins/GPv2Signing.sol';
+import {IConditionalOrder} from 'composable-cow/interfaces/IConditionalOrder.sol';
+
+import {
+    PrivateTradeTerms,
+    PrivateTradeRole,
+    PrivateTrade_NoActiveTrade,
+    PrivateTrade_WrongActiveOffer,
+    PrivateTrade_BadSettlementShape,
+    PrivateTrade_InteractionsNotAllowed,
+    PrivateTrade_OrderMismatch,
+    PrivateTrade_NotReciprocal,
+    PrivateTrade_TakerNotAllowed,
+    PrivateTrade_NotSettlementCaller
+} from '../src/interfaces/IPrivateTrade.sol';
+import {PrivateTradeLib} from '../src/libraries/PrivateTradeLib.sol';
+import {PrivateTradeTestBase} from './utils/PrivateTradeTestBase.sol';
+
+/// @notice End-to-end behaviour of a private trade, against a real `GPv2Settlement`.
+contract PrivateTradeSettlementTest is PrivateTradeTestBase {
+    // --- happy path
+
+    /// @dev Both legs settle, both balances move, and the settlement keeps nothing.
+    function test_settlesExactPairAtomically() public {
+        (
+            PrivateTradeTerms memory terms,
+            IConditionalOrder.ConditionalOrderParams memory makerParams,
+            IConditionalOrder.ConditionalOrderParams memory takerParams
+        ) = _readyTrade();
+
+        assertEq(usdc.balanceOf(address(alice)), USDC_AMOUNT);
+        assertEq(wbtc.balanceOf(address(alice)), 0);
+        assertEq(wbtc.balanceOf(address(bob)), WBTC_AMOUNT);
+        assertEq(usdc.balanceOf(address(bob)), 0);
+
+        _settle(terms, makerParams, takerParams);
+
+        assertEq(usdc.balanceOf(address(alice)), 0, 'alice still holds USDC');
+        assertEq(wbtc.balanceOf(address(alice)), WBTC_AMOUNT, 'alice did not receive WBTC');
+        assertEq(wbtc.balanceOf(address(bob)), 0, 'bob still holds WBTC');
+        assertEq(usdc.balanceOf(address(bob)), USDC_AMOUNT, 'bob did not receive USDC');
+
+        assertEq(usdc.balanceOf(address(settlement)), 0, 'settlement kept USDC');
+        assertEq(wbtc.balanceOf(address(settlement)), 0, 'settlement kept WBTC');
+        assertEq(wrapper.activeOfferId(), bytes32(0), 'context not cleared');
+        assertEq(wrapper.activeTaker(), address(0), 'context not cleared');
+    }
+
+    /// @dev An offer with no counterparty restriction can be accepted by anyone holding the link.
+    function test_openOfferIsAcceptedByAnyWallet() public {
+        PrivateTradeTerms memory terms = _terms(address(carol));
+        _fund(alice, usdc, USDC_AMOUNT);
+        _approveRelayer(alice, usdc, USDC_AMOUNT);
+        _fund(carol, wbtc, WBTC_AMOUNT);
+        _approveRelayer(carol, wbtc, WBTC_AMOUNT);
+
+        IConditionalOrder.ConditionalOrderParams memory makerParams =
+            _authorize(alice, PrivateTradeRole.Maker, terms, 'maker');
+        IConditionalOrder.ConditionalOrderParams memory takerParams =
+            _authorize(carol, PrivateTradeRole.Taker, terms, 'taker');
+
+        _settle(terms, makerParams, takerParams);
+
+        assertEq(wbtc.balanceOf(address(alice)), WBTC_AMOUNT);
+        assertEq(usdc.balanceOf(address(carol)), USDC_AMOUNT);
+    }
+
+    // --- the core invariant: an order is worthless outside its pair
+
+    /// @dev The maker order alone cannot be settled, even by an authorised solver.
+    function test_directSettleMakerAloneReverts() public {
+        (PrivateTradeTerms memory terms,,) = _readyTrade();
+        GPv2Trade.Data[] memory all = _trades(terms, _params(PrivateTradeRole.Maker, terms, 'maker'), _params(PrivateTradeRole.Taker, terms, 'taker'));
+
+        GPv2Trade.Data[] memory justMaker = new GPv2Trade.Data[](1);
+        justMaker[0] = all[0];
+
+        vm.prank(solver);
+        vm.expectRevert(PrivateTrade_NoActiveTrade.selector);
+        settlement.settle(_tokens(), _clearingPrices(), justMaker, _emptyInteractions());
+    }
+
+    /// @dev The taker order alone cannot be settled either.
+    function test_directSettleTakerAloneReverts() public {
+        (PrivateTradeTerms memory terms,,) = _readyTrade();
+        GPv2Trade.Data[] memory all = _trades(terms, _params(PrivateTradeRole.Maker, terms, 'maker'), _params(PrivateTradeRole.Taker, terms, 'taker'));
+
+        GPv2Trade.Data[] memory justTaker = new GPv2Trade.Data[](1);
+        justTaker[0] = all[1];
+
+        vm.prank(solver);
+        vm.expectRevert(PrivateTrade_NoActiveTrade.selector);
+        settlement.settle(_tokens(), _clearingPrices(), justTaker, _emptyInteractions());
+    }
+
+    /// @dev Even the complete pair is unusable when it reaches the settlement directly, without
+    /// the wrapper publishing the terms.
+    function test_directSettleCompletePairReverts() public {
+        (
+            PrivateTradeTerms memory terms,
+            IConditionalOrder.ConditionalOrderParams memory makerParams,
+            IConditionalOrder.ConditionalOrderParams memory takerParams
+        ) = _readyTrade();
+
+        vm.prank(solver);
+        vm.expectRevert(PrivateTrade_NoActiveTrade.selector);
+        settlement.settle(_tokens(), _clearingPrices(), _trades(terms, makerParams, takerParams), _emptyInteractions());
+    }
+
+    /// @dev A leaked maker order cannot be re-paired with a different counterparty: the offer id
+    /// the maker actually authorised is not the one the attacker claims.
+    function test_offerCommitmentBlocksRepairingWithAnotherCounterparty() public {
+        // Alice authorises her order against an offer restricted to Bob.
+        PrivateTradeTerms memory aliceTerms = _terms(address(bob), address(bob));
+        _fund(alice, usdc, USDC_AMOUNT);
+        _approveRelayer(alice, usdc, USDC_AMOUNT);
+        _authorize(alice, PrivateTradeRole.Maker, aliceTerms, 'maker');
+
+        // Attacker rewrites the offer to "anyone" and pairs the leaked order with Carol.
+        PrivateTradeTerms memory tampered = _terms(address(carol), address(0));
+        _fund(carol, wbtc, WBTC_AMOUNT);
+        _approveRelayer(carol, wbtc, WBTC_AMOUNT);
+        IConditionalOrder.ConditionalOrderParams memory carolParams =
+            _authorize(carol, PrivateTradeRole.Taker, tampered, 'taker');
+
+        IConditionalOrder.ConditionalOrderParams memory makerParams =
+            _params(PrivateTradeRole.Maker, aliceTerms, 'maker');
+
+        vm.prank(solver);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                PrivateTrade_WrongActiveOffer.selector,
+                PrivateTradeLib.offerId(aliceTerms.offer),
+                PrivateTradeLib.offerId(tampered.offer)
+            )
+        );
+        wrapper.wrappedSettle(
+            _tokens(),
+            _clearingPrices(),
+            _trades(tampered, makerParams, carolParams),
+            _emptyInteractions(),
+            _wrapperData(tampered)
+        );
+    }
+
+    /// @dev A restricted offer rejects a different taker even if that taker authorised an order.
+    function test_restrictedOfferRejectsDifferentTaker() public {
+        PrivateTradeTerms memory aliceTerms = _terms(address(bob), address(bob));
+        _fund(alice, usdc, USDC_AMOUNT);
+        _approveRelayer(alice, usdc, USDC_AMOUNT);
+        _authorize(alice, PrivateTradeRole.Maker, aliceTerms, 'maker');
+
+        PrivateTradeTerms memory carolTerms = _terms(address(carol), address(bob));
+        _fund(carol, wbtc, WBTC_AMOUNT);
+        _approveRelayer(carol, wbtc, WBTC_AMOUNT);
+        IConditionalOrder.ConditionalOrderParams memory carolParams =
+            _authorize(carol, PrivateTradeRole.Taker, carolTerms, 'taker');
+
+        IConditionalOrder.ConditionalOrderParams memory makerParams =
+            _params(PrivateTradeRole.Maker, aliceTerms, 'maker');
+
+        vm.prank(solver);
+        vm.expectRevert(
+            abi.encodeWithSelector(PrivateTrade_TakerNotAllowed.selector, address(bob), address(carol))
+        );
+        wrapper.wrappedSettle(
+            _tokens(),
+            _clearingPrices(),
+            _trades(carolTerms, makerParams, carolParams),
+            _emptyInteractions(),
+            _wrapperData(carolTerms)
+        );
+    }
+
+    /// @dev A settled pair cannot be replayed.
+    function test_replayReverts() public {
+        (
+            PrivateTradeTerms memory terms,
+            IConditionalOrder.ConditionalOrderParams memory makerParams,
+            IConditionalOrder.ConditionalOrderParams memory takerParams
+        ) = _readyTrade();
+
+        _settle(terms, makerParams, takerParams);
+
+        vm.prank(solver);
+        vm.expectRevert(bytes('GPv2: order filled'));
+        wrapper.wrappedSettle(
+            _tokens(),
+            _clearingPrices(),
+            _trades(terms, makerParams, takerParams),
+            _emptyInteractions(),
+            _wrapperData(terms)
+        );
+    }
+
+    // --- wrapper-side rejections
+
+    function test_rejectsNonReciprocalClearingPrices() public {
+        (PrivateTradeTerms memory terms, IConditionalOrder.ConditionalOrderParams memory makerParams, IConditionalOrder.ConditionalOrderParams memory takerParams) =
+            _readyTrade();
+
+        uint256[] memory prices = _clearingPrices();
+        prices[0] = prices[0] + 1; // maker would receive more than agreed
+
+        vm.prank(solver);
+        vm.expectRevert(PrivateTrade_NotReciprocal.selector);
+        wrapper.wrappedSettle(
+            _tokens(), prices, _trades(terms, makerParams, takerParams), _emptyInteractions(), _wrapperData(terms)
+        );
+    }
+
+    function test_rejectsDuplicateMakerOrder() public {
+        (PrivateTradeTerms memory terms, IConditionalOrder.ConditionalOrderParams memory makerParams, IConditionalOrder.ConditionalOrderParams memory takerParams) =
+            _readyTrade();
+
+        GPv2Trade.Data[] memory trades = _trades(terms, makerParams, takerParams);
+        trades[1] = trades[0];
+
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(PrivateTrade_OrderMismatch.selector, 1));
+        wrapper.wrappedSettle(_tokens(), _clearingPrices(), trades, _emptyInteractions(), _wrapperData(terms));
+    }
+
+    function test_rejectsSingleTrade() public {
+        (PrivateTradeTerms memory terms, IConditionalOrder.ConditionalOrderParams memory makerParams, IConditionalOrder.ConditionalOrderParams memory takerParams) =
+            _readyTrade();
+
+        GPv2Trade.Data[] memory all = _trades(terms, makerParams, takerParams);
+        GPv2Trade.Data[] memory one = new GPv2Trade.Data[](1);
+        one[0] = all[0];
+
+        vm.prank(solver);
+        vm.expectRevert(PrivateTrade_BadSettlementShape.selector);
+        wrapper.wrappedSettle(_tokens(), _clearingPrices(), one, _emptyInteractions(), _wrapperData(terms));
+    }
+
+    function test_rejectsAnyInteraction() public {
+        (PrivateTradeTerms memory terms, IConditionalOrder.ConditionalOrderParams memory makerParams, IConditionalOrder.ConditionalOrderParams memory takerParams) =
+            _readyTrade();
+
+        GPv2Interaction.Data[][3] memory interactions = _emptyInteractions();
+        interactions[2] = new GPv2Interaction.Data[](1);
+        interactions[2][0] = GPv2Interaction.Data({target: address(usdc), value: 0, callData: hex'00'});
+
+        vm.prank(solver);
+        vm.expectRevert(PrivateTrade_InteractionsNotAllowed.selector);
+        wrapper.wrappedSettle(
+            _tokens(), _clearingPrices(), _trades(terms, makerParams, takerParams), interactions, _wrapperData(terms)
+        );
+    }
+
+    function test_rejectsNonSolverCaller() public {
+        (PrivateTradeTerms memory terms, IConditionalOrder.ConditionalOrderParams memory makerParams, IConditionalOrder.ConditionalOrderParams memory takerParams) =
+            _readyTrade();
+
+        vm.prank(makeAddr('random'));
+        vm.expectRevert(bytes('GPv2Wrapper: not a solver'));
+        wrapper.wrappedSettle(
+            _tokens(),
+            _clearingPrices(),
+            _trades(terms, makerParams, takerParams),
+            _emptyInteractions(),
+            _wrapperData(terms)
+        );
+    }
+
+    /// @dev The handler refuses to validate anything unless the settlement is the caller.
+    function test_verifyRejectsNonSettlementCaller() public {
+        (PrivateTradeTerms memory terms, IConditionalOrder.ConditionalOrderParams memory makerParams,) = _readyTrade();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(PrivateTrade_NotSettlementCaller.selector, address(settlement), address(this))
+        );
+        handler.verify(
+            address(alice),
+            address(this),
+            bytes32(0),
+            bytes32(0),
+            bytes32(0),
+            makerParams.staticInput,
+            '',
+            PrivateTradeLib.makerOrder(terms)
+        );
+    }
+
+    // --- helper assertions
+
+    /// @dev Guards against the local flags encoder drifting from the settlement's decoder.
+    function test_tradeFlagsDecodeAsExactSellOrder() public {
+        (PrivateTradeTerms memory terms,,) = _readyTrade();
+        GPv2Trade.Data memory trade = _trade(
+            PrivateTradeLib.makerOrder(terms), _params(PrivateTradeRole.Maker, terms, 'maker'), address(alice), 0, 1
+        );
+
+        (
+            bytes32 kind,
+            bool partiallyFillable,
+            bytes32 sellTokenBalance,
+            bytes32 buyTokenBalance,
+            GPv2Signing.Scheme signingScheme
+        ) = GPv2Trade.extractFlags(trade.flags);
+
+        assertEq(kind, GPv2Order.KIND_SELL);
+        assertFalse(partiallyFillable);
+        assertEq(sellTokenBalance, GPv2Order.BALANCE_ERC20);
+        assertEq(buyTokenBalance, GPv2Order.BALANCE_ERC20);
+        assertEq(uint256(signingScheme), uint256(GPv2Signing.Scheme.Eip1271));
+    }
+
+    // --- internals
+
+    function _settle(
+        PrivateTradeTerms memory terms,
+        IConditionalOrder.ConditionalOrderParams memory makerParams,
+        IConditionalOrder.ConditionalOrderParams memory takerParams
+    ) internal {
+        vm.prank(solver);
+        wrapper.wrappedSettle(
+            _tokens(),
+            _clearingPrices(),
+            _trades(terms, makerParams, takerParams),
+            _emptyInteractions(),
+            _wrapperData(terms)
+        );
+    }
+}

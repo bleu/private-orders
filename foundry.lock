@@ -1,0 +1,17 @@
+{
+  "lib/composable-cow": {
+    "rev": "af3975e5637264fa93e642a9e3b05c072ddb3abb"
+  },
+  "lib/cow-shed": {
+    "tag": {
+      "name": "v2.1.0",
+      "rev": "3b021fab77594e7c3128b7a467d500403928d8a7"
+    }
+  },
+  "lib/forge-std": {
+    "tag": {
+      "name": "v1.16.2",
+      "rev": "bf647bd6046f2f7da30d0c2bf435e5c76a780c1b"
+    }
+  }
+}
