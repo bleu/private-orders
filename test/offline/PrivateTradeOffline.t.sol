@@ -2,8 +2,6 @@
 pragma solidity >=0.8.0 <0.9.0;
 
 import {COWShedFactory} from "cow-shed/COWShedFactory.sol";
-import {COWShedForComposableCoW} from "cow-shed/COWShedForComposableCoW.sol";
-import {IComposableCow} from "cow-shed/IComposableCow.sol";
 
 import {PrivateTradeE2EBase} from "../e2e/PrivateTradeE2EBase.sol";
 
@@ -19,6 +17,9 @@ interface IMintableERC20 {
 /// OFFLINE_RPC=http://localhost:8545 forge test --match-path 'test/offline/*' -vv
 /// ```
 contract PrivateTradeOfflineTest is PrivateTradeE2EBase {
+  /// @dev Read from the offline repo's `.env` after the deploy. See docs/OFFLINE.md.
+  address internal constant COWSHED_FACTORY_FOR_COMPOSABLE_COW = 0x3dbB9bb851a9cFB575D1D3691745F82A42c3A505;
+
   function setUp() public {
     string memory rpc = vm.envOr("OFFLINE_RPC", string(""));
     if (bytes(rpc).length == 0) {
@@ -29,12 +30,11 @@ contract PrivateTradeOfflineTest is PrivateTradeE2EBase {
     _setUpProtocol();
   }
 
-  /// @dev The offline stack deploys the *plain* `COWShed`, whose implementation has no
-  /// `isValidSignature`, so a Shed there cannot own a ComposableCoW order. Deploy the
-  /// ComposableCoW variant ourselves; the factory is permissionless.
+  /// @dev The stack's own Shed factory, whose implementation is `COWShedForComposableCoW`. The
+  /// deploy script used to install the plain `COWShed`, which has no `isValidSignature` and cannot
+  /// own a conditional order; `contracts/script/DeployCoWShed.s.sol` now deploys this variant.
   function _setUpShedFactory() internal override {
-    COWShedForComposableCoW impl = new COWShedForComposableCoW(IComposableCow(COMPOSABLE_COW));
-    shedFactory = new COWShedFactory(address(impl));
+    shedFactory = COWShedFactory(COWSHED_FACTORY_FOR_COMPOSABLE_COW);
   }
 
   /// @dev The offline stack serves mintable test tokens at the mainnet token addresses.

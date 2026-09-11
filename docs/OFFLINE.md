@@ -24,27 +24,49 @@ at `0x5E284e80F3bd6A7D80A8500D9c49878028110848`, and real USDC/DAI seeded with `
 
 The repo ships a prebuilt `state/anvil-state.json`, and `chain-deployer` short-circuits whenever it
 exists. Regenerating requires **an archive-capable mainnet RPC** (`MAINNET_RPC_URL`), because the
-deploy replays mainnet transactions onto anvil. A public endpoint is not enough: the run fails at
-`Error: tx not found` during the CoW core deployment. Back up the state file before trying.
+deploy replays mainnet transactions and fetches mainnet bytecode. A public endpoint is not enough:
+the run fails at `Error: tx not found` during the CoW core deployment, and again at
+`Connection refused` in the EthFlow step if any script ignores the variable. Back up the state file
+first, and force container recreation (`docker compose up --force-recreate`), because `docker compose
+stop`/`start` reuses the container's original environment.
 
-That shipped state is also stale in one way that matters here:
+```bash
+cd offline-mode
+cp state/anvil-state.json state/anvil-state.backup.json
+sed -i '' "s|^MAINNET_RPC_URL=.*|MAINNET_RPC_URL=<archive rpc>|" .env
+docker compose rm -sf chain-deployer chain
+mv state/anvil-state.json /tmp/          # must be absent, or the deploy is skipped
+docker compose up --force-recreate chain-deployer chain   # ~10 min
+```
 
-- **It deploys the plain `COWShed`, not `COWShedForComposableCoW`.** The plain implementation has no
-  `isValidSignature`, so a Shed on it cannot own a ComposableCoW order.
-- **Its Shed is version 2.0.0**, while the current `cow-shed` is 2.1.0, and the version is inside the
-  EIP-712 domain. Signing with the wrong version fails as `InvalidSignature()`.
-- **`COWSHED_COMPOSABLE_COW_FACTORY_ADDRESS` is read but never deployed or configured.**
-  `scripts/orders/composable-cow/*.ts` and `test/utils/loadAddresses.ts` all expect it.
+Then read the new `COWSHED_IMPLEMENTATION_ADDRESS` / `COWSHED_FACTORY_ADDRESS` from the deploy log,
+update `.env` (including `COWSHED_COMPOSABLE_COW_FACTORY_ADDRESS`), and restart the services.
 
-`contracts/script/DeployCoWShed.s.sol` is patched to deploy `COWShedForComposableCoW`, so a
-regeneration with an archive RPC produces a stack whose Shed can own conditional orders. Until then,
-`test/offline/*` deploys the ComposableCoW Shed itself. It also reads `VERSION()` from the deployed
-implementation instead of hardcoding the domain version.
+Three defects made this necessary, all fixed on the offline repo's
+`bleu/composable-cow-shed-regeneration` branch:
+
+- **`DeployCoWShed.s.sol` deployed the plain `COWShed`.** That implementation has no
+  `isValidSignature`, so a Shed could not own a CoW Protocol conditional order at all. It now
+  deploys `COWShedForComposableCoW`.
+- **`11-deploy-ethflow.ts` hardcoded `https://eth.llamarpc.com`**, ignoring `MAINNET_RPC_URL`, so a
+  regeneration could never finish against a working RPC.
+- **`COWSHED_COMPOSABLE_COW_FACTORY_ADDRESS` was read but never deployed or configured.**
+  `scripts/orders/composable-cow/*.ts` and `test/utils/loadAddresses.ts` all expect it; it is now
+  documented and deployed.
+
+One known delta remains: `package-lock.json` pins `cowdao-grants/cow-shed` at `ab2c865` (v2.0.0),
+while upstream `main` is at `7037b8d` (v2.1.0). The deployed Shed therefore reports `VERSION()`
+`2.0.0`, and the EIP-712 domain version differs from the current library. `test/e2e` reads
+`VERSION()` from the deployed implementation instead of hardcoding it. To move to 2.1.0, refresh the
+lock entry (`npm install github:cowdao-grants/cow-shed --legacy-peer-deps`) and regenerate.
 
 ## Offline stack notes
 
 The stack's `db` service publishes host port 5432, which collides with any local Postgres. Set
 `PORT_DB=5433` in the offline repo's `.env`.
+
+The stack's Shed factory is deployed by `contracts/script/DeployCoWShed.s.sol`; the address lives in
+the offline repo's `.env` and is duplicated in `test/offline/PrivateTradeOffline.t.sol`.
 
 The Rust workspace needs about 25 GB free, and a container VM with more than the default 2 CPUs
 (`colima start --cpu 6 --memory 12`). `modules/services/rust-toolchain` pins `stable`, which is too
