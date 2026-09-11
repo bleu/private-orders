@@ -123,6 +123,23 @@ Three things worth stating:
   a tradeless settlement. A private trade cannot be: both orders are fill-or-kill and the settlement
   marks them filled, so a replay already reverts with `GPv2: order filled`.
 
+## The link service
+
+Turns an agreed trade into a shareable link and drives it to settlement:
+
+```
+./scripts/link-service-e2e.sh
+```
+
+Maker creates an offer and gets a link; the taker opens it, signs, accepts; the service relays both
+hook bundles, hands the private half to the sub-solver, and posts the taker's order. Verified on the
+offline stack, ending in a settled offer.
+
+The service holds **no key that can move value** — it relays owner-signed bundles and posts an
+ERC-1271 payload — and it **never re-derives the trade**: `script/LinkCompute.s.sol` *is*
+`PrivateTradeBuilder`, so the service cannot drift from the on-chain rules. See
+[docs/LINK-SERVICE.md](docs/LINK-SERVICE.md).
+
 ## Executing through the driver (JIT + fulfillment)
 
 The maker's half never reaches the orderbook. The taker posts an order, and a sub-solver pairs the two
@@ -157,6 +174,7 @@ five things the driver requires that cost time to discover.
 | Submitter (fallback) | `src/PrivateTradeSubmitter.sol`, driven by both e2e suites | A deployed, allowlisted, keyless relay executed by a caller that is not a solver |
 | Payload builder | `test/PrivateTradeBuilder.t.sol` | The production builder agrees with the fixtures the suites are written against |
 | Driver, JIT + fulfillment | `scripts/private-trade-e2e.sh` | The driver encodes and submits `wrappedSettle`; the pair settles on the real stack |
+| Link service | `scripts/link-service-e2e.sh` | Create → share → sign → accept → settle, driven through the service's HTTP API |
 
 `./scripts/offline-e2e.sh` runs the last one; see [docs/OFFLINE.md](docs/OFFLINE.md).
 

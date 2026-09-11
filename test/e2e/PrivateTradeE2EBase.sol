@@ -33,6 +33,7 @@ import {GPv2TradeEncoder} from "../../src/vendor/GPv2TradeEncoder.sol";
 import {PrivateTradeBuilder} from "../../src/libraries/PrivateTradeBuilder.sol";
 import {PrivateTradeSubmission} from "../../src/libraries/PrivateTradeSubmission.sol";
 import {PrivateTradeProposal} from "../../src/libraries/PrivateTradeProposal.sol";
+import {ShedBundle} from "../../src/libraries/ShedBundle.sol";
 import {PrivateTradeSubmitter} from "../../src/PrivateTradeSubmitter.sol";
 
 /// @dev The Shed implementation states its own EIP-712 domain version, and the deployed version
@@ -432,32 +433,13 @@ abstract contract PrivateTradeE2EBase is Test {
     bundle.signature = abi.encodePacked(r, s, v);
   }
 
-  /// @dev Mirrors `LibAuthenticatedHooks.hashToSign`, including the single-byte `v` encoding.
+  /// @dev Delegates to the shared library the link service also uses, so the harness cannot drift
+  /// from what a real signer signs.
   function _executeHooksDigest(address shed, Call[] memory calls, bytes32 nonce, uint256 deadline)
     internal
     view
     returns (bytes32)
   {
-    bytes32 domainSeparator =
-      keccak256(abi.encode(EIP712_DOMAIN_TYPE_HASH, keccak256("COWShed"), shedDomainVersion, block.chainid, shed));
-
-    bytes32[] memory callHashes = new bytes32[](calls.length);
-    for (uint256 i = 0; i < calls.length; ++i) {
-      callHashes[i] = keccak256(
-        abi.encode(
-          CALL_TYPE_HASH,
-          calls[i].target,
-          calls[i].value,
-          keccak256(calls[i].callData),
-          calls[i].allowFailure,
-          calls[i].isDelegateCall
-        )
-      );
-    }
-
-    bytes32 structHash =
-      keccak256(abi.encode(EXECUTE_HOOKS_TYPE_HASH, keccak256(abi.encodePacked(callHashes)), nonce, deadline));
-
-    return keccak256(abi.encodePacked(hex"1901", domainSeparator, structHash));
+    return ShedBundle.digest(address(shedFactory), shed, calls, nonce, deadline);
   }
 }

@@ -17,23 +17,35 @@
 
 import http from 'node:http';
 import fs from 'node:fs';
+import path from 'node:path';
 
 const PORT = Number(process.env.PORT ?? 9100);
-const OFFER_FILE = process.env.OFFER_FILE ?? '/tmp/private-trade-offer.json';
+const OFFERS_DIR = process.env.OFFERS_DIR ?? '/tmp/private-trade-offers';
+const OFFER_FILE = process.env.OFFER_FILE ?? null;
 const SOLVE_LOG = process.env.SOLVE_LOG ?? '/tmp/private-trade-solve.log';
 
 function log(entry) {
   fs.appendFileSync(SOLVE_LOG, `${JSON.stringify(entry)}\n`);
 }
 
-function loadOffer() {
-  if (!fs.existsSync(OFFER_FILE)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(OFFER_FILE, 'utf8'));
-  } catch (err) {
-    log({ error: `unreadable offer file: ${err.message}` });
-    return null;
+/// Every private offer this sub-solver is holding. One file per offer, so several can be live.
+function loadOffers() {
+  const files = [];
+  if (OFFER_FILE && fs.existsSync(OFFER_FILE)) files.push(OFFER_FILE);
+  if (fs.existsSync(OFFERS_DIR)) {
+    for (const name of fs.readdirSync(OFFERS_DIR)) {
+      if (name.endsWith('.json')) files.push(path.join(OFFERS_DIR, name));
+    }
   }
+  const offers = [];
+  for (const file of files) {
+    try {
+      offers.push(JSON.parse(fs.readFileSync(file, 'utf8')));
+    } catch (err) {
+      log({ error: `unreadable offer ${file}: ${err.message}` });
+    }
+  }
+  return offers;
 }
 
 const hexEq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
@@ -112,9 +124,9 @@ const server = http.createServer((req, res) => {
     }
 
     log({ at: new Date().toISOString(), raw: body.slice(0, 400), bytes: body.length });
-    const offer = loadOffer();
+    const offers = loadOffers();
     const orders = auction.orders ?? [];
-    const solutions = offer ? buildSolution(auction, offer) : [];
+    const solutions = offers.flatMap((offer) => buildSolution(auction, offer));
 
     log({
       at: new Date().toISOString(),
@@ -141,6 +153,6 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  log({ at: new Date().toISOString(), listening: PORT, offerFile: OFFER_FILE });
-  console.log(`private trade sub-solver listening on ${PORT}, offer file ${OFFER_FILE}`);
+  log({ at: new Date().toISOString(), listening: PORT, offersDir: OFFERS_DIR });
+  console.log(`private trade sub-solver listening on ${PORT}, offers in ${OFFERS_DIR}`);
 });
