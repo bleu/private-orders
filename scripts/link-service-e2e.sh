@@ -22,6 +22,16 @@ TAKER=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
 
 log() { printf '\n==> %s\n' "$*"; }
 
+# Impersonated, test-only: clears an allowance so the permit path is genuinely exercised. The
+# nonces are captured after this, so the "no transaction" assertion still holds for the real flow.
+reset_allowance() {
+  local token=$1 owner=$2 spender=$3
+  cast rpc anvil_impersonateAccount "${owner}" --rpc-url "${RPC}" >/dev/null
+  cast send "${token}" "approve(address,uint256)" "${spender}" 0 \
+    --from "${owner}" --unlocked --rpc-url "${RPC}" >/dev/null
+  cast rpc anvil_stopImpersonatingAccount "${owner}" --rpc-url "${RPC}" >/dev/null
+}
+
 # The four balances that move when the pair settles: the two sell tokens, and the two received
 # tokens. Printed as one line so a caller can read them into variables.
 snapshot() {
@@ -90,17 +100,25 @@ MAKER_SHED=$(echo "${OFFER}" | jqq "d['makerBundle']['shed']")
 echo "   link: $(echo "${OFFER}" | jqq "d['link']")"
 
 # The maker's signature funds the Shed, so the only prior step is one ERC-20 approval to it.
-log "maker approves their Shed to move the sell tokens"
+# The maker moves no transaction: the permit grants their Shed the allowance and the relayer
+# submits it. The nonce taken here is checked at the end, so "no transaction" is asserted, not
+# claimed.
+MAKER_NONCE=$(cast nonce "${MAKER}" --rpc-url "${RPC}")
+# Earlier runs may have left an allowance behind, which would let the permit path be skipped and the
+# run pass without testing it. Clear both, so what follows is the permit.
+reset_allowance "${USDC_ADDRESS}" "${MAKER}" "${MAKER_SHED}"
+MAKER_NONCE=$(cast nonce "${MAKER}" --rpc-url "${RPC}")
 cast send "${USDC_ADDRESS}" "mint(address,uint256)" "${MAKER}" 100000000 \
   --private-key "${ANVIL_KEY_0}" --rpc-url "${RPC}" >/dev/null
-cast send "${USDC_ADDRESS}" "approve(address,uint256)" "${MAKER_SHED}" 100000000 \
-  --private-key "${MAKER_KEY}" --rpc-url "${RPC}" >/dev/null
 
-log "maker signs"
+log "maker signs the bundle and the permit — no transaction"
+echo "   permit: $(echo "${OFFER}" | jqq "d['funding']['kind']")"
 MAKER_DIGEST=$(echo "${OFFER}" | jqq "d['makerBundle']['digest']")
+MAKER_PERMIT=$(echo "${OFFER}" | jqq "d['funding']['digest']")
 MAKER_SIG=$(cast wallet sign --no-hash --private-key "${MAKER_KEY}" "${MAKER_DIGEST}")
+MAKER_PERMIT_SIG=$(cast wallet sign --no-hash --private-key "${MAKER_KEY}" "${MAKER_PERMIT}")
 curl -fsS -X POST "${SERVICE}/offers/${OFFER_ID}/signature" -H 'content-type: application/json' \
-  -d "{\"role\":\"maker\",\"signature\":\"${MAKER_SIG}\"}" >/dev/null
+  -d "{\"role\":\"maker\",\"signature\":\"${MAKER_SIG}\",\"permitSignature\":\"${MAKER_PERMIT_SIG}\"}" >/dev/null
 
 # --- 4. the taker opens the link and accepts -----------------------------------------------------
 
@@ -110,20 +128,31 @@ TAKER_SHED=$(echo "${VIEW}" | jqq "d['takerBundle']['shed']")
 TAKER_DIGEST=$(echo "${VIEW}" | jqq "d['takerBundle']['digest']")
 echo "   taker pays $(echo "${VIEW}" | jqq "d['terms']['sellAmount']") for $(echo "${VIEW}" | jqq "d['terms']['buyAmount']")"
 
-log "taker approves their Shed to move the sell tokens"
+log "taker signs the bundle and the permit — no transaction"
+echo "   permit: $(echo "${VIEW}" | jqq "d['funding']['kind']")"
 cast send "${DAI_ADDRESS}" "mint(address,uint256)" "${TAKER}" 100000000000000000000 \
   --private-key "${ANVIL_KEY_0}" --rpc-url "${RPC}" >/dev/null
-cast send "${DAI_ADDRESS}" "approve(address,uint256)" "${TAKER_SHED}" 100000000000000000000 \
-  --private-key "${TAKER_KEY}" --rpc-url "${RPC}" >/dev/null
+reset_allowance "${DAI_ADDRESS}" "${TAKER}" "${TAKER_SHED}"
+TAKER_NONCE=$(cast nonce "${TAKER}" --rpc-url "${RPC}")
+TAKER_PERMIT=$(echo "${VIEW}" | jqq "d['funding']['digest']")
 
 read -r M0 MD0 T0 TU0 <<< "$(snapshot)"
 
 log "taker accepts"
 TAKER_SIG=$(cast wallet sign --no-hash --private-key "${TAKER_KEY}" "${TAKER_DIGEST}")
+TAKER_PERMIT_SIG=$(cast wallet sign --no-hash --private-key "${TAKER_KEY}" "${TAKER_PERMIT}")
 ACCEPT=$(curl -fsS -X POST "${SERVICE}/offers/${OFFER_ID}/accept" -H 'content-type: application/json' \
-  -d "{\"signature\":\"${TAKER_SIG}\"}")
+  -d "{\"signature\":\"${TAKER_SIG}\",\"permitSignature\":\"${TAKER_PERMIT_SIG}\"}")
 ORDER_UID=$(echo "${ACCEPT}" | jqq "d['orderUid']")
 echo "   order ${ORDER_UID}"
+
+# Nothing had approved either Shed — the allowances were cleared above — so the permit is the only
+# thing that can have granted them. The relay says so, per side.
+for side in maker taker; do
+  echo "${ACCEPT}" | jqq "d['relay']" | grep -q "permit applied" \
+    || { echo "FAILED: no permit was applied for the ${side}" >&2; exit 1; }
+done
+echo "   both permits applied by the relayer" 
 
 # --- 5. wait ------------------------------------------------------------------------------------
 
@@ -139,7 +168,14 @@ done
 [ "${STATUS}" = "settled" ] || { echo "FAILED: status is ${STATUS}" >&2; exit 1; }
 
 read -r M1 MD1 T1 TU1 <<< "$(snapshot)"
+# The claim this flow makes is that neither party sends a transaction. Assert it.
+[ "$(cast nonce "${MAKER}" --rpc-url "${RPC}")" = "${MAKER_NONCE}" ] \
+  || { echo "FAILED: the maker sent a transaction" >&2; exit 1; }
+[ "$(cast nonce "${TAKER}" --rpc-url "${RPC}")" = "${TAKER_NONCE}" ] \
+  || { echo "FAILED: the taker sent a transaction" >&2; exit 1; }
+
 log "settled"
+echo "   neither party sent a transaction (maker nonce ${MAKER_NONCE}, taker nonce ${TAKER_NONCE})"
 echo "   maker shed USDC ${M0} -> ${M1}   (sold)"
 echo "   maker shed DAI  ${MD0} -> ${MD1}   (received)"
 echo "   taker shed DAI  ${T0} -> ${T1}   (sold)"

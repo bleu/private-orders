@@ -7,17 +7,26 @@ import {COWShedFactory} from "cow-shed/COWShedFactory.sol";
 import {COWShed} from "cow-shed/COWShed.sol";
 import {Call} from "cow-shed/ICOWAuthHook.sol";
 
+import {IERC20} from "cowprotocol/contracts/interfaces/IERC20.sol";
+
 import {ShedBundle} from "../src/libraries/ShedBundle.sol";
+import {TokenPermit} from "../src/libraries/TokenPermit.sol";
 
 /// @notice Relays both parties' signed hook bundles for a computed private trade.
 ///
 /// In: `out-json/link-computed.json` (from `LinkCompute`) and `out-json/link-signatures.json`
-///     `{"maker":"0x…","taker":"0x…"}`, 65-byte `r || s || v` signatures over each digest.
+///     `{"maker":"0x…","taker":"0x…","makerPermit":"0x…","takerPermit":"0x…"}`, 65-byte
+///     `r || s || v` signatures. The permit entries are the party's `permit` signatures, absent when
+///     the token has no permit support.
 ///
 /// Relaying is permissionless: a valid bundle is an owner signature, so the relayer is whoever pays
 /// the gas. Two checks run first, because the Shed's own failure mode is a bare `InvalidSignature()`
 /// that does not say whether the digest or the key was wrong: the relayed bundle must hash to the
 /// digest the party signed, and that signature must recover to the Shed's owner.
+///
+/// Where the token supports `permit`, this is also where the party's allowance gets granted. The
+/// permit signature is not a secret — it can only move the party's sell tokens into the party's own
+/// Shed, for this amount — so the relayer submits it, and the party never needs a transaction.
 contract LinkRelay is Script {
   function run() external {
     uint256 relayerPrivateKey = vm.envUint("RELAYER_PRIVATE_KEY");
@@ -26,11 +35,81 @@ contract LinkRelay is Script {
     string memory signatures = vm.readFile("out-json/link-signatures.json");
 
     vm.startBroadcast(relayerPrivateKey);
+    _permit(computed, signatures, ".makerBundle", ".makerPermit");
+    _permit(computed, signatures, ".takerBundle", ".takerPermit");
     _relay(shedFactory, computed, signatures, ".makerBundle", ".maker");
     _relay(shedFactory, computed, signatures, ".takerBundle", ".taker");
     vm.stopBroadcast();
 
     console.log("bundles relayed");
+  }
+
+  /// @dev Grants the party's allowance to their own Shed, from the party's signature.
+  ///
+  /// A failure here is not fatal: a permit can be front-run, and the front-runner's submission grants
+  /// exactly the same allowance. So the result is checked afterwards by reading the allowance, which
+  /// is the fact that matters, and which produces an actionable error when it is missing.
+  function _permit(
+    string memory computed,
+    string memory signatures,
+    string memory bundleKey,
+    string memory signatureKey
+  ) private {
+    string memory permitKind = vm.parseJsonString(computed, string.concat(bundleKey, ".permitKind"));
+    if (keccak256(bytes(permitKind)) == keccak256("none")) return;
+
+    TokenPermit.Permit memory permit = _permitFrom(computed, bundleKey);
+
+    // Already granted by an earlier `approve`, or already submitted: nothing to do.
+    if (IERC20(permit.token).allowance(permit.owner, permit.spender) >= permit.amount) return;
+
+    bytes memory signature = vm.parseJsonBytes(signatures, signatureKey);
+    require(
+      signature.length == 65,
+      string.concat(bundleKey, ": the token supports permit but no permit signature was supplied")
+    );
+
+    address signer = TokenPermit.recover(permit, signature);
+    require(
+      signer == permit.owner,
+      string.concat(
+        bundleKey, ": permit signature recovers to ", vm.toString(signer), ", not ", vm.toString(permit.owner)
+      )
+    );
+
+    (bool ok,) = permit.token.call(TokenPermit.callData(permit, signature));
+    if (!ok) console.log(bundleKey, "permit call did not apply; the allowance check will decide");
+
+    require(
+      IERC20(permit.token).allowance(permit.owner, permit.spender) >= permit.amount,
+      string.concat(
+        bundleKey,
+        ": no allowance for the Shed after the permit. The party can approve ",
+        vm.toString(permit.token),
+        " to ",
+        vm.toString(permit.spender),
+        " directly instead."
+      )
+    );
+    console.log(bundleKey, "permit applied:", permitKind);
+  }
+
+  /// @dev The permit as the party signed it. The nonce comes from the file rather than the chain: it
+  /// is what the signature commits to, and the two can differ if another permit landed in between.
+  function _permitFrom(string memory computed, string memory key)
+    private
+    view
+    returns (TokenPermit.Permit memory permit)
+  {
+    permit.token = vm.parseJsonAddress(computed, string.concat(key, ".sellToken"));
+    permit.owner = vm.parseJsonAddress(computed, string.concat(key, ".owner"));
+    permit.spender = vm.parseJsonAddress(computed, string.concat(key, ".shed"));
+    permit.amount = vm.parseJsonUint(computed, string.concat(key, ".sellAmount"));
+    permit.deadline = vm.parseJsonUint(computed, string.concat(key, ".deadline"));
+    permit.nonce = vm.parseJsonUint(computed, string.concat(key, ".permitNonce"));
+    permit.allowed = true;
+    permit.kind = TokenPermit.kind(permit.token);
+    permit.domainSeparator = TokenPermit.domainSeparator(permit.token);
   }
 
   function _relay(

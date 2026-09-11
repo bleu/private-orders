@@ -135,8 +135,10 @@ Maker creates an offer and gets a link; the taker opens it, signs, accepts; the 
 hook bundles, hands the private half to the sub-solver, and posts the taker's order. Verified on the
 offline stack, ending in a settled offer.
 
-Funding is inside the signed bundle: each party approves their Shed once, then one signature funds the
-Shed, authorises the order, and lets settlement take the sell tokens.
+Funding is inside the signed bundle, and the allowance comes from an EIP-2612 (or DAI-style) permit
+the relayer submits: **neither party sends a transaction.** Two signatures — the bundle and the permit
+— fund the Shed, authorise the order, and let settlement take the sell tokens. Tokens without permit
+fall back to one `approve`, which the service reports per side.
 
 The service holds **no key that can move value** — it relays owner-signed bundles and posts an
 ERC-1271 payload — and it **never re-derives the trade**: `script/LinkCompute.s.sol` *is*
@@ -177,7 +179,7 @@ five things the driver requires that cost time to discover.
 | Submitter (fallback) | `src/PrivateTradeSubmitter.sol`, driven by both e2e suites | A deployed, allowlisted, keyless relay executed by a caller that is not a solver |
 | Payload builder | `test/PrivateTradeBuilder.t.sol` | The production builder agrees with the fixtures the suites are written against |
 | Driver, JIT + fulfillment | `scripts/private-trade-e2e.sh` | The driver encodes and submits `wrappedSettle`; the pair settles on the real stack |
-| Link service | `scripts/link-service-e2e.sh` | Create → share → sign → accept → settle, driven through the service's HTTP API |
+| Link service | `scripts/link-service-e2e.sh` | Create → share → sign → accept → settle, driven through the service's HTTP API, with neither party sending a transaction |
 
 `./scripts/offline-e2e.sh` runs the last one; see [docs/OFFLINE.md](docs/OFFLINE.md).
 

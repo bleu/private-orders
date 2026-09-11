@@ -85,16 +85,32 @@ function compute(request) {
 }
 
 /// Relay both owner-signed bundles. Permissionless, and safe to retry.
-function relay(computed, makerSignature, takerSignature) {
+function relay(computed, signatures) {
   fs.writeFileSync(
     path.join(ROOT, 'out-json', 'link-signatures.json'),
-    JSON.stringify({ maker: makerSignature, taker: takerSignature }, null, 2),
+    JSON.stringify(
+      {
+        maker: signatures.maker,
+        taker: signatures.taker,
+        // Empty when the token has no permit; the relay skips those.
+        makerPermit: signatures.makerPermit ?? '0x',
+        takerPermit: signatures.takerPermit ?? '0x',
+      },
+      null,
+      2,
+    ),
   );
-  execFileSync(
+  const out = execFileSync(
     'forge',
-    ['script', 'script/LinkRelay.s.sol', '--rpc-url', RPC, '--broadcast', '-q'],
+    ['script', 'script/LinkRelay.s.sol', '--rpc-url', RPC, '--broadcast'],
     { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, RELAYER_PRIVATE_KEY: CONFIG.relayerKey } },
-  );
+  ).toString();
+
+  // The relay's own lines, returned so a caller can see what happened without reading a log file.
+  return out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.includes('permit applied') || line.includes('digest matches') || line.includes('relayed'));
 }
 
 async function postOrder(order) {
@@ -134,25 +150,35 @@ async function status(offer) {
   return { status: order.status === 'fulfilled' ? 'settled' : 'settling', orderUid: offer.orderUid };
 }
 
-/// What a party must do before signing. The bundle funds the Shed itself, so the only prior step is
-/// one ERC-20 approval to the Shed. A separate transfer would cost a second transaction and leave a
-/// window where the order is authorised but unfunded.
-const funding = (computed, role) =>
-  computed.fund === false
-    ? {
-        note: 'send the sell tokens to your Shed, then sign',
-        token: computed[role === 'maker' ? 'sellToken' : 'buyToken'],
-        to: role === 'maker' ? computed.makerShed : computed.takerBundle.shed,
-        amount: computed[role === 'maker' ? 'sellAmount' : 'buyAmount'],
-      }
-    : {
-        note: 'approve your Shed once, then a single signature funds it and authorises the order',
-        token: computed[role === 'maker' ? 'sellToken' : 'buyToken'],
-        owner: role === 'maker' ? computed.maker : computed.takerBundle.owner,
-        spender: role === 'maker' ? computed.makerShed : computed.takerBundle.shed,
-        amount: computed[role === 'maker' ? 'sellAmount' : 'buyAmount'],
-        doneBy: 'your signature; this is the only transaction you need before signing',
-      };
+/// What a party must do before signing.
+///
+/// Where the token supports `permit`, the party signs an EIP-712 permit and the relayer submits it,
+/// so the party needs no transaction at all. Where it does not, the party approves their Shed first —
+/// the fallback that works for every token. The two cases are reported distinctly so a client never
+/// has to guess which one it is in.
+const funding = (computed, role) => {
+  const side = role === 'maker' ? computed.makerBundle : computed.takerBundle;
+  const common = { token: side.sellToken, owner: side.owner, spender: side.shed, amount: side.sellAmount };
+
+  if (side.permitKind === 'none') {
+    return {
+      mode: 'approve',
+      ...common,
+      note: 'this token has no permit: approve your Shed first, then sign',
+      approve: `approve(${side.shed}, ${side.sellAmount}) on ${side.sellToken}`,
+    };
+  }
+
+  return {
+    mode: 'permit',
+    ...common,
+    kind: side.permitKind,
+    deadline: side.deadline,
+    digest: side.permitDigest,
+    note: `sign the permit and the bundle; the relayer submits both, so you need no transaction`,
+    verify: 'the permit can only move this amount into your own Shed, so publishing it is safe',
+  };
+};
 
 const page = (offer, computed) => `<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -173,10 +199,10 @@ const page = (offer, computed) => `<!doctype html>
  <tr><td>Counterparty</td><td><code>${computed.makerShed}</code></td></tr>
  <tr><td>Expires</td><td>${new Date(Number(computed.validTo) * 1000).toISOString()}</td></tr>
 </table>
-<p class="muted">First approve your Shed to take <b>${computed.buyAmount}</b> <code>${computed.buyToken}</code>
- (<code>approve(${computed.takerBundle.shed}, ${computed.buyAmount})</code>). Then sign this digest with the
- wallet that owns your Shed, and <code>POST /offers/${offer.id}/accept</code> with
- <code>{"signature":"0x…"}</code> — the signature funds your Shed and authorises the order in one go.</p>
+<p class="muted">Sign the digest below with the wallet that owns your Shed, and the permit digest if
+ there is one, then <code>POST /offers/${offer.id}/accept</code> with
+ <code>{"signature":"0x…","permitSignature":"0x…"}</code>. The signature funds your Shed and authorises the
+ order; where the token supports permit the relayer submits that too, so you need no transaction.</p>
 <p><code>${computed.takerBundle.digest}</code></p>`;
 
 const server = http.createServer(async (req, res) => {
@@ -206,13 +232,21 @@ const server = http.createServer(async (req, res) => {
       const computed = compute(request);
       const id = computed.offerId.slice(2, 12);
 
-      const offer = { id, request, computed, createdAt: new Date().toISOString(), signatures: {} };
+      const offer = {
+        id,
+        request,
+        computed,
+        createdAt: new Date().toISOString(),
+        signatures: {},
+        permits: {},
+      };
       saveOffer(offer);
 
       return json(res, 201, {
         id,
         link: `${PUBLIC_URL}/o/${id}`,
         funding: funding(computed, 'maker'),
+        permitRequired: computed.makerBundle.permitKind !== 'none',
         makerBundle: {
           shed: computed.makerBundle.shed,
           nonce: computed.makerBundle.nonce,
@@ -245,6 +279,7 @@ const server = http.createServer(async (req, res) => {
             digest: offer.computed.takerBundle.digest,
           },
           funding: funding(offer.computed, 'taker'),
+          permitRequired: offer.computed.takerBundle.permitKind !== 'none',
           orderUid: offer.orderUid ?? null,
         });
       }
@@ -257,7 +292,15 @@ const server = http.createServer(async (req, res) => {
         if (!/^0x[0-9a-fA-F]{130}$/.test(body.signature ?? '')) {
           return json(res, 400, { error: 'signature must be 65 bytes, r || s || v' });
         }
+        const side = body.role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
+        if (side.permitKind !== 'none' && !/^0x[0-9a-fA-F]{130}$/.test(body.permitSignature ?? '')) {
+          return json(res, 400, {
+            error: `the sell token supports permit, so a permitSignature is required alongside it`,
+            permitKind: side.permitKind,
+          });
+        }
         offer.signatures[body.role] = body.signature;
+        if (body.permitSignature) offer.permits[body.role] = body.permitSignature;
         saveOffer(offer);
         return json(res, 200, { id: offer.id, signed: Object.keys(offer.signatures) });
       }
@@ -279,10 +322,23 @@ const server = http.createServer(async (req, res) => {
         const signature = body.signature ?? offer.signatures.taker;
         if (!signature) return json(res, 400, { error: 'signature required' });
         offer.signatures.taker = signature;
+        if (body.permitSignature) offer.permits.taker = body.permitSignature;
+
+        for (const role of ['maker', 'taker']) {
+          const side = role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
+          if (side.permitKind !== 'none' && !offer.permits[role]) {
+            return json(res, 400, {
+              error: `the ${role}'s sell token supports permit, so its permitSignature is required`,
+              permitKind: side.permitKind,
+              funding: funding(offer.computed, role),
+            });
+          }
+        }
 
         // Relaying funds both Sheds, so the baseline for "has it settled" must be read after it,
         // not before: otherwise the funding transfer itself looks like a sale.
-        relay(offer.computed, offer.signatures.maker, offer.signatures.taker);
+        const relayLog =
+          relay(offer.computed, { ...offer.signatures, makerPermit: offer.permits.maker, takerPermit: offer.permits.taker });
         offer.makerBalanceAtAccept = balanceOf(offer.computed.sellToken, offer.computed.makerShed);
 
         // The sub-solver now needs the private half: the maker's terms and its JIT order. Until
@@ -293,7 +349,7 @@ const server = http.createServer(async (req, res) => {
         offer.acceptedAt = new Date().toISOString();
         saveOffer(offer);
 
-        return json(res, 202, { id: offer.id, orderUid: offer.orderUid, status: 'settling' });
+        return json(res, 202, { id: offer.id, orderUid: offer.orderUid, status: 'settling', relay: relayLog });
       }
     }
 

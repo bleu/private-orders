@@ -14,6 +14,7 @@ import {PrivateTradeAppData} from "../src/libraries/PrivateTradeAppData.sol";
 import {PrivateTradeBuilder} from "../src/libraries/PrivateTradeBuilder.sol";
 import {PrivateTradeLib} from "../src/libraries/PrivateTradeLib.sol";
 import {ShedBundle} from "../src/libraries/ShedBundle.sol";
+import {TokenPermit} from "../src/libraries/TokenPermit.sol";
 
 /// @notice Derives everything a private trade link needs, from a request file, with no private key
 /// and no transaction. The link service calls this instead of re-deriving the payload in its own
@@ -124,9 +125,31 @@ contract LinkCompute is Script {
       json = string.concat(json, '","fundCall":"', vm.toString(calls[0].callData));
     }
     json = string.concat(json, '","createCall":"', vm.toString(calls[request.fund ? 2 : 1].callData));
-    json = string.concat(json, '","digest":"');
+    json = string.concat(json, _permitJson(sellToken, owner, shed, sellAmount, deadline));
+    // `permitNonce` is a number, so the next fragment opens with a comma rather than a closing quote.
+    json = string.concat(json, ',"digest":"');
     json = string.concat(json, vm.toString(_digest(request, shed, calls, nonce, deadline)));
     json = string.concat(json, '"}');
+  }
+
+  /// @dev Where the token supports permit, the party grants the Shed its allowance by signature
+  /// instead of a transaction. The relay submits it, so the party pays nothing. `permitKind` is
+  /// `"none"` for a token that has no permit, and the party falls back to an `approve` transaction.
+  function _permitJson(address sellToken, address owner, address shed, uint256 sellAmount, uint256 deadline)
+    private
+    view
+    returns (string memory json)
+  {
+    TokenPermit.Permit memory permit = TokenPermit.build(sellToken, owner, shed, sellAmount, deadline);
+    json = string.concat('","permitKind":"', _permitKind(permit.kind));
+    json = string.concat(json, '","permitDigest":"', vm.toString(TokenPermit.digest(permit)));
+    json = string.concat(json, '","permitNonce":', vm.toString(permit.nonce));
+  }
+
+  function _permitKind(TokenPermit.Kind kind) private pure returns (string memory) {
+    if (kind == TokenPermit.Kind.Eip2612) return "eip2612";
+    if (kind == TokenPermit.Kind.DaiLike) return "dai";
+    return "none";
   }
 
   /// @dev The calls one party's bundle executes: fund the Shed, let the vault relayer take the sell

@@ -23,6 +23,7 @@ That script is the whole story: it deploys the contracts, allowlists the wrapper
 sub-solver and the service, then acts as both parties. Against the offline stack it ends with:
 
 ```
+   neither party sent a transaction (maker nonce 6, taker nonce 6)
 ==> settled
    maker shed USDC 600000000 -> 600000000   (sold)
    maker shed DAI  400000000000000000000 -> 500000000000000000000   (received)
@@ -33,10 +34,12 @@ sub-solver and the service, then acts as both parties. Against the offline stack
 The sell side nets to zero on purpose: the party funded their Shed and the Shed spent it, both inside
 the one signed bundle. The received side is the trade.
 
-## Funding is part of the signature
+## Funding, and why neither party pays gas
 
-The Shed owns the order, so it must hold the sell tokens before the pair can settle. Rather than
-leaving that as a separate transfer, the funding call rides **inside the same signed bundle**:
+The Shed owns the order, so it must hold the sell tokens before the pair can settle. Two things make
+that happen without the party sending a transaction.
+
+**The funding rides inside the signed bundle:**
 
 ```
 transferFrom(you, yourShed, sellAmount)   // fund it
@@ -44,36 +47,45 @@ approve(vaultRelayer, sellAmount)         // let settlement take it
 create(orderParams)                       // authorise the order
 ```
 
-So a party does exactly two things: approve their Shed on the sell token **once**, then sign. One
-signature funds the Shed and authorises the order, and there is no window where the order is live but
-unfunded. Send `{"fund": false}` to `POST /offers` for authorisation only, if the party would rather
-move the tokens themselves.
+**The allowance to the Shed comes from a `permit`.** Where the token supports it, the party signs an
+EIP-712 permit instead of sending an `approve`, and the relayer submits it. So a party does two
+signatures and zero transactions:
 
-## What the service does and does not hold
+| | |
+| --- | --- |
+| Bundle digest | Funds the Shed and authorises the order |
+| Permit digest | Grants the Shed its allowance |
 
-It holds **no key that can move value**. It relays owner-signed hook bundles, which anyone may do,
-and posts an order whose signature is an ERC-1271 payload, not a secret. The only signatures it ever
-sees are the two parties'.
+The permit signature is safe to publish: it can only move that amount into the party's own Shed, and
+the bundle's `transferFrom` is the thing that spends it. It is also permissionless to submit, so no
+one can hold it hostage.
 
-It also **never re-derives the trade**. `script/LinkCompute.s.sol` *is* `PrivateTradeBuilder`, so the
-service cannot drift from the on-chain rules — it moves JSON and calls `forge`/`cast`. A service that
-reimplemented the offer id, the appData document or the order structs in another language would be a
-second source of truth, and the two would eventually disagree.
+Both shapes in the wild are supported, detected from the token rather than assumed:
 
-## API
+- **EIP-2612** — `permit(owner, spender, value, deadline, v, r, s)`. USDC, and most modern tokens.
+- **DAI-style** — `permit(holder, spender, nonce, expiry, allowed, v, r, s)`. DAI.
 
-| Route | Auth | Purpose |
-| --- | --- | --- |
-| `POST /offers` | none | Describe the trade. Returns the link, the funding instruction, and the digest the maker must sign. |
-| `GET /offers/:id` | none | The link target: terms, plus the digest the taker must sign. |
-| `GET /o/:id` | none | The same, as a page for a human. |
-| `POST /offers/:id/signature` | none | `{role: "maker"\|"taker", signature}`. 65-byte `r \|\| s \|\| v`. |
-| `POST /offers/:id/accept` | none | The taker accepts. Relays, publishes the offer to the sub-solver, posts the order. |
-| `GET /offers/:id/status` | none | `open` / `signed` / `settling` / `settled`, derived from the chain and the orderbook. |
-| `GET /health` | none | liveness |
+The digest is built from the token's own `DOMAIN_SEPARATOR()`, so there is no second EIP-712 domain to
+get wrong.
 
-There is no account system. The two signatures *are* the authorisation, and the service cannot use
-them for anything except the trade they describe.
+**Where permit is unavailable, nothing breaks.** The party sends one `approve` to their Shed and then
+signs as before. The service reports which case applies, so a client never has to guess:
+
+```json
+"funding": { "mode": "permit", "kind": "eip2612", "digest": "0x…", "spender": "0x…" }
+"funding": { "mode": "approve", "approve": "approve(0x…, 100000000) on 0x…" }
+```
+
+Two things decide whether permit is used, and both are deliberate:
+
+- **Detection is a `staticcall` on the selector.** A token that writes storage before validating
+  reverts with no data under a static call, which looks exactly like the function not existing. Such
+  a token is reported as unsupported and the party falls back to `approve`. The cost is one needless
+  transaction; the alternative is a signature no contract accepts.
+- **The relay checks the allowance afterwards, not the permit call's result.** A permit can be
+  front-run, and a front-runner grants exactly the same allowance. So the relay treats a failed
+  permit call as fine and then asserts the allowance, failing with the token and spender to approve
+  directly if it is missing.
 
 ## Two things that will bite an integrator
 
@@ -91,9 +103,11 @@ opaque revert.
 
 ## Known gaps
 
-- **The approval to the Shed is still a separate transaction**, because it must be signed by the
-  party's own key. It is a one-time, standard ERC-20 approval per token, but it is not free and it is
-  not batched with the signature. An EIP-2612 permit where the token supports it would remove it.
+- **A party signs twice.** The bundle and the permit are separate EIP-712 domains (the Shed's and the
+  token's), so they cannot be merged into one message. Two signatures and no transaction beats one
+  signature and a transaction for a taker with no ETH, but it is not the theoretical minimum.
+- **A permit signed at offer time can expire before settlement.** Its deadline is the offer's, so a
+  long-lived offer needs a fresh permit rather than a stale one.
 - **Storage is local files.** Offers live under `out-json/link/`. A deployment needs a database and
   a reaper for expired offers.
 - **No offer expiry sweep.** An offer that is never accepted keeps its authorisation on-chain until
