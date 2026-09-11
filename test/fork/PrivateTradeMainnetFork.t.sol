@@ -64,4 +64,10 @@ contract PrivateTradeMainnetForkTest is PrivateTradeE2EBase {
   function daiBalance(address who) internal view returns (uint256) {
     return IERC20Balance(DAI).balanceOf(who);
   }
+
+  /// @dev A submitter will be retried; relaying an executed bundle must not revert.
+  function test_resubmittingOnMainnetForkIsSafe() public {
+    if (!active) return;
+    _runResubmitIsSafe();
+  }
 }

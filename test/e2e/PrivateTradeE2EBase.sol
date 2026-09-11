@@ -28,7 +28,10 @@ import {
   PrivateTrade_NoActiveTrade
 } from "../../src/interfaces/IPrivateTrade.sol";
 
-import {GPv2TradeEncoder} from "../utils/GPv2TradeEncoder.sol";
+import {GPv2TradeEncoder} from "../../src/vendor/GPv2TradeEncoder.sol";
+import {PrivateTradeBuilder} from "../../src/libraries/PrivateTradeBuilder.sol";
+import {PrivateTradeSubmission} from "../../src/libraries/PrivateTradeSubmission.sol";
+import {PrivateTradeSubmitter} from "../../src/PrivateTradeSubmitter.sol";
 
 /// @dev The Shed implementation states its own EIP-712 domain version, and the deployed version
 /// differs between networks: mainnet runs 2.1.0, the offline stack runs 2.0.0. Read it from the
@@ -69,6 +72,9 @@ abstract contract PrivateTradeE2EBase is Test {
   PrivateTradeWrapper internal wrapper;
   PrivateTradeOrder internal handler;
 
+  /// @dev The deployed, allowlisted relay. Anyone may call it; it owns no keys.
+  PrivateTradeSubmitter internal submitter;
+
   address internal aliceEoa;
   uint256 internal alicePk;
   address internal bobEoa;
@@ -103,6 +109,7 @@ abstract contract PrivateTradeE2EBase is Test {
 
     wrapper = new PrivateTradeWrapper(ICowSettlement(SETTLEMENT));
     handler = new PrivateTradeOrder(wrapper);
+    submitter = new PrivateTradeSubmitter();
 
     // The wrapper becomes the direct caller of GPv2Settlement.settle, so it must be an
     // authenticated solver on this chain.
@@ -110,6 +117,8 @@ abstract contract PrivateTradeE2EBase is Test {
     address manager = auth.manager();
     vm.prank(manager);
     auth.addSolver(address(wrapper));
+    vm.prank(manager);
+    auth.addSolver(address(submitter));
 
     shedDomainVersion = keccak256(bytes(IShedImplementation(shedFactory.implementation()).VERSION()));
 
@@ -123,49 +132,59 @@ abstract contract PrivateTradeE2EBase is Test {
     bobShed = shedFactory.proxyOf(bobEoa);
   }
 
-  /// @dev Fund both Sheds and authorise both orders, exactly as the two parties would.
-  function _prepareTrade()
-    internal
-    returns (
-      PrivateTradeTerms memory terms,
+  /// @dev What a party signs, and what the submitter relays.
+  struct SignedTrade {
+    PrivateTradeTerms terms;
+    PrivateTradeSubmission.HookBundle maker;
+    PrivateTradeSubmission.HookBundle taker;
+  }
+
+  function _submitterContext() internal view returns (PrivateTradeSubmission.Context memory) {
+    return PrivateTradeSubmission.Context({
+      wrapper: address(wrapper),
+      handler: address(handler),
+      shedFactory: address(shedFactory),
+      settlement: address(settlement)
+    });
+  }
+
+  /// @dev Fund both Sheds and have both parties sign their hook bundles, exactly as they would
+  /// client-side. Nothing here is submitted yet.
+  function _prepareTrade() internal returns (SignedTrade memory signed) {
+    signed.terms = _terms(aliceShed, bobShed, bobShed);
+
+    // Both parties must authorise the orders the builder will derive, so both sides derive them the
+    // same way rather than each inventing their own params.
+    (
       IConditionalOrder.ConditionalOrderParams memory makerParams,
-      IConditionalOrder.ConditionalOrderParams memory takerParams,
-      bytes32 appData
-    )
-  {
-    terms = _terms(aliceShed, bobShed, bobShed);
-    makerParams = _params(PrivateTradeRole.Maker, terms, "maker");
-    takerParams = _params(PrivateTradeRole.Taker, terms, "taker");
+      IConditionalOrder.ConditionalOrderParams memory takerParams
+    ) = PrivateTradeBuilder.conditionalOrderParams(address(handler), signed.terms);
 
     _fundSheds();
 
-    _relayBundle(aliceEoa, alicePk, aliceShed, _bundle(USDC, USDC_AMOUNT, makerParams));
-    _relayBundle(bobEoa, bobPk, bobShed, _bundle(DAI, DAI_AMOUNT, takerParams));
-
-    assertGt(aliceShed.code.length, 0, "alice shed not deployed");
-    assertGt(bobShed.code.length, 0, "bob shed not deployed");
-    assertTrue(cow.singleOrders(aliceShed, cow.hash(makerParams)), "maker order not authorised");
-    assertTrue(cow.singleOrders(bobShed, cow.hash(takerParams)), "taker order not authorised");
-
-    // appData declares the bundle, exactly as the app-data service would serve it.
-    bytes memory bundleData = PrivateTradeAppData.wrapperData(PrivateTradeLib.offerId(terms.offer), terms);
-    appData = PrivateTradeAppData.documentHash(address(wrapper), bundleData);
+    signed.maker = _signBundle(aliceEoa, alicePk, aliceShed, _bundle(USDC, USDC_AMOUNT, makerParams), "maker");
+    signed.taker = _signBundle(bobEoa, bobPk, bobShed, _bundle(DAI, DAI_AMOUNT, takerParams), "taker");
   }
 
-  /// @dev The pair, settled directly against the settlement contract, with no wrapper. This is
-  /// the "another solver found both orders" case, and it must fail.
+  /// @dev The pair, settled directly against the settlement contract, with no wrapper. This is the
+  /// "another solver found both orders" case, and it must fail.
   function _runDirectSettlementReverts() internal {
-    (
-      PrivateTradeTerms memory terms,
-      IConditionalOrder.ConditionalOrderParams memory makerParams,
-      IConditionalOrder.ConditionalOrderParams memory takerParams,
-      bytes32 appData
-    ) = _prepareTrade();
+    SignedTrade memory signed = _prepareTrade();
 
-    GPv2Trade.Data[] memory trades = _trades(terms, makerParams, takerParams, appData);
-    IERC20[] memory tokens = _tokens();
-    uint256[] memory prices = _clearingPrices();
-    GPv2Interaction.Data[][3] memory interactions = _emptyInteractions();
+    // Relaying the bundles is permissionless, so a solver can put both orders on-chain. It still
+    // cannot execute them without the wrapper.
+    PrivateTradeSubmission.relayBundles(_submitterContext(), signed.maker, signed.taker);
+
+    (
+      IConditionalOrder.ConditionalOrderParams memory makerParams,
+      IConditionalOrder.ConditionalOrderParams memory takerParams
+    ) = PrivateTradeBuilder.conditionalOrderParams(address(handler), signed.terms);
+    bytes32 appData = PrivateTradeBuilder.appDataHash(signed.terms, address(wrapper));
+
+    IERC20[] memory tokens = PrivateTradeBuilder.tokens(signed.terms);
+    uint256[] memory prices = PrivateTradeBuilder.clearingPrices(signed.terms);
+    GPv2Trade.Data[] memory trades = PrivateTradeBuilder.trades(signed.terms, makerParams, takerParams, appData);
+    GPv2Interaction.Data[][3] memory interactions = PrivateTradeBuilder.emptyInteractions();
 
     vm.prank(solver);
     vm.expectRevert(PrivateTrade_NoActiveTrade.selector);
@@ -175,27 +194,21 @@ abstract contract PrivateTradeE2EBase is Test {
     assertEq(IERC20(DAI).balanceOf(bobShed), DAI_AMOUNT, "funds moved despite revert");
   }
 
-  /// @dev The full flow, asserted.
+  /// @dev The full flow, driven by the submitter: relay both bundles, build the pair, submit.
   function _runPrivateTrade() internal {
-    (
-      PrivateTradeTerms memory terms,
-      IConditionalOrder.ConditionalOrderParams memory makerParams,
-      IConditionalOrder.ConditionalOrderParams memory takerParams,
-      bytes32 appData
-    ) = _prepareTrade();
-
-    bytes memory settleData = abi.encodeCall(
-      settlement.settle,
-      (_tokens(), _clearingPrices(), _trades(terms, makerParams, takerParams, appData), _emptyInteractions())
-    );
+    SignedTrade memory signed = _prepareTrade();
 
     // A production settlement contract holds balances from unrelated activity, so assert
     // retention rather than zero.
     uint256 settlementUsdcBefore = IERC20(USDC).balanceOf(SETTLEMENT);
     uint256 settlementDaiBefore = IERC20(DAI).balanceOf(SETTLEMENT);
 
-    vm.prank(solver); // any authenticated solver may submit; the pair is what protects it
-    wrapper.wrappedSettle(settleData, _chainedWrapperData(terms));
+    // No prank: `address(this)` is not an authenticated solver. The deployed submitter is, and it
+    // is the submitter's identity that authenticates the calls it makes, not the caller's.
+    submitter.submit(_submitterContext(), signed.terms, signed.maker, signed.taker);
+
+    assertTrue(cow.singleOrders(aliceShed, cow.hash(_makerParams(signed.terms))), "maker order not authorised");
+    assertTrue(cow.singleOrders(bobShed, cow.hash(_takerParams(signed.terms))), "taker order not authorised");
 
     assertEq(IERC20(USDC).balanceOf(aliceShed), 0, "alice shed still holds USDC");
     assertEq(IERC20(DAI).balanceOf(aliceShed), DAI_AMOUNT, "alice shed did not receive DAI");
@@ -203,6 +216,40 @@ abstract contract PrivateTradeE2EBase is Test {
     assertEq(IERC20(USDC).balanceOf(bobShed), USDC_AMOUNT, "bob shed did not receive USDC");
     assertEq(IERC20(USDC).balanceOf(SETTLEMENT), settlementUsdcBefore, "settlement retained USDC");
     assertEq(IERC20(DAI).balanceOf(SETTLEMENT), settlementDaiBefore, "settlement retained DAI");
+  }
+
+  /// @dev A submitter gets retried, so relaying a bundle that already executed must be a no-op
+  /// rather than a revert. The pair itself still cannot settle twice.
+  function _runResubmitIsSafe() internal {
+    SignedTrade memory signed = _prepareTrade();
+
+    submitter.submit(_submitterContext(), signed.terms, signed.maker, signed.taker);
+
+    // Same bundles, same nonces: skipped, not reverted.
+    submitter.relayBundles(_submitterContext(), signed.maker, signed.taker);
+
+    // The pair cannot settle twice.
+    vm.expectRevert(bytes("GPv2: order filled"));
+    submitter.submitPrepared(_submitterContext(), signed.terms);
+
+    assertEq(IERC20(DAI).balanceOf(aliceShed), DAI_AMOUNT, "alice shed did not receive DAI");
+    assertEq(IERC20(USDC).balanceOf(bobShed), USDC_AMOUNT, "bob shed did not receive USDC");
+  }
+
+  function _makerParams(PrivateTradeTerms memory terms)
+    internal
+    view
+    returns (IConditionalOrder.ConditionalOrderParams memory maker)
+  {
+    (maker,) = PrivateTradeBuilder.conditionalOrderParams(address(handler), terms);
+  }
+
+  function _takerParams(PrivateTradeTerms memory terms)
+    internal
+    view
+    returns (IConditionalOrder.ConditionalOrderParams memory taker)
+  {
+    (, taker) = PrivateTradeBuilder.conditionalOrderParams(address(handler), terms);
   }
 
   // --- fixtures
@@ -317,13 +364,23 @@ abstract contract PrivateTradeE2EBase is Test {
   }
 
   /// @dev Anyone can relay; the relayer only needs the owner's signature.
-  function _relayBundle(address owner, uint256 pk, address shed, Call[] memory calls) internal {
-    bytes32 nonce = keccak256(abi.encode("e2e-bundle", owner));
-    uint256 deadline = block.timestamp + 1 hours;
-    bytes32 digest = _executeHooksDigest(shed, calls, nonce, deadline);
-    (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+  function _signBundle(address owner, uint256 pk, address shed, Call[] memory calls, string memory label)
+    internal
+    view
+    returns (PrivateTradeSubmission.HookBundle memory bundle)
+  {
+    bundle = PrivateTradeSubmission.HookBundle({
+      owner: owner,
+      shed: shed,
+      calls: calls,
+      nonce: keccak256(abi.encode("e2e-bundle", label, owner)),
+      deadline: block.timestamp + 1 hours,
+      signature: ""
+    });
 
-    shedFactory.executeHooks(calls, nonce, deadline, owner, abi.encodePacked(r, s, v));
+    bytes32 digest = _executeHooksDigest(shed, calls, bundle.nonce, bundle.deadline);
+    (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+    bundle.signature = abi.encodePacked(r, s, v);
   }
 
   /// @dev Mirrors `LibAuthenticatedHooks.hashToSign`, including the single-byte `v` encoding.

@@ -23,7 +23,7 @@ import {PrivateTradeOrder} from "../../src/PrivateTradeOrder.sol";
 import {PrivateTradeLib} from "../../src/libraries/PrivateTradeLib.sol";
 import {PrivateOffer, PrivateTradeTerms, PrivateTradeRole} from "../../src/interfaces/IPrivateTrade.sol";
 
-import {GPv2TradeEncoder} from "./GPv2TradeEncoder.sol";
+import {GPv2TradeEncoder} from "../../src/vendor/GPv2TradeEncoder.sol";
 import {TestERC20} from "./TestERC20.sol";
 import {TestPrivateWallet} from "./TestPrivateWallet.sol";
 

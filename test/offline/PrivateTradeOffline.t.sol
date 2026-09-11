@@ -53,4 +53,10 @@ contract PrivateTradeOfflineTest is PrivateTradeE2EBase {
     if (!active) return;
     _runDirectSettlementReverts();
   }
+
+  /// @dev A submitter will be retried; relaying an executed bundle must not revert.
+  function test_resubmittingOnOfflineChainIsSafe() public {
+    if (!active) return;
+    _runResubmitIsSafe();
+  }
 }
