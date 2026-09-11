@@ -106,6 +106,12 @@ The path is:
 Step 4 is the whole integration. The orders never become public, so there is nothing to discover,
 quote, rank or compete over.
 
+Step 4 is now built: `PrivateTradeSubmitter` is a deployed, stateless contract, and
+`PrivateTradeBuilder` is the pure library it uses. Because the submitter contract is the
+allowlisted identity, the *caller* needs no permission at all — the deployed address authenticates
+the calls it makes, so anyone can relay a signed pair. Neither party, nor the service, holds a
+submitter key.
+
 **One allowlisted submitter is required.** `CowWrapper.wrappedSettle` is `external` on the base
 contract and not `virtual`, so it enforces `AUTHENTICATOR.isSolver(msg.sender)`, and the wrapper
 itself must be allowlisted because it becomes the direct caller of `GPv2Settlement.settle`. That is

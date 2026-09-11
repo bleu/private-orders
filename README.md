@@ -13,7 +13,10 @@ forge test
 ```
 
 ```
-35 tests passed, 0 failed, 1 skipped   (the offline test runs only with OFFLINE_RPC set)
+39 tests passed, 0 failed, 2 skipped
+# plus, against real deployments:
+FORK_RPC=https://ethereum-rpc.publicnode.com forge test --match-path 'test/fork/*'      # 3 passed
+./scripts/offline-e2e.sh                                                                 # 3 passed
 ```
 
 ## The guarantee
@@ -72,6 +75,25 @@ Two consequences of the framework that this design takes seriously:
    re-check the published terms against the offer each party actually authorised in
    `ComposableCoW`.
 
+## The submitter
+
+`PrivateTradeSubmitter` is a deployed, stateless contract that relays both Shed hook bundles and
+then calls `wrappedSettle`. Deploy it once, allowlist it once, and after that **anyone** can execute
+a private trade that both parties already signed: the link service, either counterparty, or a bot.
+
+It holds no funds, keeps no state, and owns no keys, so there is no account to compromise. It is
+also deliberately narrow — the only calls it can make are `COWShedFactory.executeHooks` (owner-signed
+bundles) and `PrivateTradeWrapper.wrappedSettle` (on-chain validated pair). It cannot call
+`GPv2Settlement.settle` directly, so allowlisting it grants less power than allowlisting a solver.
+
+Retrying is safe: a bundle whose nonce is already consumed is skipped, so a resubmission only
+re-fails if the pair itself already settled.
+
+`PrivateTradeBuilder` is the pure library behind it, and the single place the payload is
+constructed: both orders, both EIP-1271 signatures, the clearing prices, the settlement calldata and
+the bundle chain. It needs no private key, because order authorisation comes from the Shed-owned
+conditional orders rather than from an ECDSA signature.
+
 ## Paths covered
 
 | Path | Where | What it proves |
@@ -81,6 +103,8 @@ Two consequences of the framework that this design takes seriously:
 | Driver wire format | `test/PrivateTradeDriverFormat.t.sol` | The bytes the driver actually produces, including the appended auction id |
 | EOA -> CoW Shed | `test/PrivateTradeShed.t.sol` | Real `COWShedFactory` + `COWShedForComposableCoW`, owner-signed bundles, relayed by anyone |
 | Offline chain | `test/offline/PrivateTradeOffline.t.sol` | The real settlement, shed factory, ComposableCoW and tokens on `bleu/cow-offline-mode` |
+| Submitter | `src/PrivateTradeSubmitter.sol`, driven by both e2e suites | A deployed, allowlisted, keyless relay executed by a caller that is not a solver |
+| Payload builder | `test/PrivateTradeBuilder.t.sol` | The production builder agrees with the fixtures the suites are written against |
 
 `./scripts/offline-e2e.sh` runs the last one; see [docs/OFFLINE.md](docs/OFFLINE.md).
 
@@ -148,18 +172,15 @@ test/utils/                         harness: contract wallet, ERC20, flags encod
 
 ## Not built yet
 
-1. **The submitter.** One allowlisted account that calls `wrappedSettle` with the two signed bundles.
-   Nothing more: no orderbook, no auction, no solver competition. BYOS is the natural fit, since it
-   is already a bonded, allowlisted solver.
-2. **The link service.** Holding the offer, generating the link, collecting the acceptance, then
+1. **The link service.** Holding the offer, generating the link, collecting the acceptance, then
    handing both halves to the submitter. The on-chain half is done; this is the product half.
-3. **Atomic funding inside the settlement.** Approvals and order authorisation are atomic with the
+2. **Atomic funding inside the settlement.** Approvals and order authorisation are atomic with the
    trade only if the signed bundles travel in the bundle chain. Funding is currently a separate
    transfer into the Shed. The Shed is owner-controlled, so nothing is stranded, but it is two
    transactions instead of one.
-4. **Allowlisting and audit.** Production bundles must pass a security audit and be approved by CoW
+3. **Allowlisting and audit.** Production bundles must pass a security audit and be approved by CoW
    DAO, and the submitter must be allowlisted. Neither governance step is in scope here.
-5. **Non-ERC20 assets.** NFTs, game items, partial fills.
+4. **Non-ERC20 assets.** NFTs, game items, partial fills.
 
 Pinned to `cowprotocol/contracts@main`, `cowprotocol/composable-cow@main`, `cowdao-grants/cow-shed@main`,
 and the upstream `CowWrapper.sol`.
