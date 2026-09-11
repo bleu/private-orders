@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity >=0.8.0 <0.9.0;
 
+import {COWShedFactory} from "cow-shed/COWShedFactory.sol";
+
 import {PrivateTradeE2EBase} from "../e2e/PrivateTradeE2EBase.sol";
 
 interface IERC20Balance {
@@ -32,8 +34,8 @@ contract PrivateTradeMainnetForkTest is PrivateTradeE2EBase {
     _setUpProtocol();
   }
 
-  function _shedFactoryAddress() internal pure override returns (address) {
-    return COWSHED_FACTORY_FOR_COMPOSABLE_COW;
+  function _setUpShedFactory() internal override {
+    shedFactory = COWShedFactory(COWSHED_FACTORY_FOR_COMPOSABLE_COW);
   }
 
   /// @dev Real balances: `deal` writes the token's balance mapping on the fork.

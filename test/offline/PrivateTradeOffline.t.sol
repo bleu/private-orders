@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity >=0.8.0 <0.9.0;
 
+import {COWShedFactory} from "cow-shed/COWShedFactory.sol";
+import {COWShedForComposableCoW} from "cow-shed/COWShedForComposableCoW.sol";
+import {IComposableCow} from "cow-shed/IComposableCow.sol";
+
 import {PrivateTradeE2EBase} from "../e2e/PrivateTradeE2EBase.sol";
 
 interface IMintableERC20 {
@@ -15,10 +19,6 @@ interface IMintableERC20 {
 /// OFFLINE_RPC=http://localhost:8545 forge test --match-path 'test/offline/*' -vv
 /// ```
 contract PrivateTradeOfflineTest is PrivateTradeE2EBase {
-  /// @dev The offline stack deploys its own Shed factory, at a deterministic address that is not
-  /// the mainnet one.
-  address internal constant COWSHED_FACTORY = 0xDb086A44b9db2650e9e3c1F21Fc7ba6B7d4B6681;
-
   function setUp() public {
     string memory rpc = vm.envOr("OFFLINE_RPC", string(""));
     if (bytes(rpc).length == 0) {
@@ -29,8 +29,12 @@ contract PrivateTradeOfflineTest is PrivateTradeE2EBase {
     _setUpProtocol();
   }
 
-  function _shedFactoryAddress() internal pure override returns (address) {
-    return COWSHED_FACTORY;
+  /// @dev The offline stack deploys the *plain* `COWShed`, whose implementation has no
+  /// `isValidSignature`, so a Shed there cannot own a ComposableCoW order. Deploy the
+  /// ComposableCoW variant ourselves; the factory is permissionless.
+  function _setUpShedFactory() internal override {
+    COWShedForComposableCoW impl = new COWShedForComposableCoW(IComposableCow(COMPOSABLE_COW));
+    shedFactory = new COWShedFactory(address(impl));
   }
 
   /// @dev The offline stack serves mintable test tokens at the mainnet token addresses.

@@ -30,6 +30,13 @@ import {
 
 import {GPv2TradeEncoder} from "../utils/GPv2TradeEncoder.sol";
 
+/// @dev The Shed implementation states its own EIP-712 domain version, and the deployed version
+/// differs between networks: mainnet runs 2.1.0, the offline stack runs 2.0.0. Read it from the
+/// implementation instead of hardcoding, so the test signs over the domain the proxy actually uses.
+interface IShedImplementation {
+  function VERSION() external view returns (string memory);
+}
+
 /// @notice Shared end-to-end flow: two EOAs own their orders through CoW Sheds, and one settlement
 /// exchanges the two assets atomically, on a real deployment of the protocol contracts.
 ///
@@ -72,10 +79,16 @@ abstract contract PrivateTradeE2EBase is Test {
   /// @dev Stands in for the bonded solver that relays the settlement.
   address internal solver;
 
+  /// @dev `keccak256` of the Shed's EIP-712 domain version, read from the deployed implementation.
+  bytes32 internal shedDomainVersion;
+
   bool internal active;
 
   /// @notice The Shed factory to use on this network.
-  function _shedFactoryAddress() internal view virtual returns (address);
+  /// @notice Select the Shed factory to use, and the Shed implementation behind it.
+  /// @dev Subclasses either point at a deployment or deploy the ComposableCoW variant themselves,
+  /// because not every stack ships it: the offline stack deploys the plain `COWShed`.
+  function _setUpShedFactory() internal virtual;
 
   /// @notice Put tokens in the two Sheds. Real balances are required: the settlement pulls them.
   function _fundSheds() internal virtual;
@@ -86,7 +99,7 @@ abstract contract PrivateTradeE2EBase is Test {
 
     settlement = GPv2Settlement(payable(SETTLEMENT));
     cow = ComposableCoW(COMPOSABLE_COW);
-    shedFactory = COWShedFactory(_shedFactoryAddress());
+    _setUpShedFactory();
 
     wrapper = new PrivateTradeWrapper(ICowSettlement(SETTLEMENT));
     handler = new PrivateTradeOrder(wrapper);
@@ -97,6 +110,8 @@ abstract contract PrivateTradeE2EBase is Test {
     address manager = auth.manager();
     vm.prank(manager);
     auth.addSolver(address(wrapper));
+
+    shedDomainVersion = keccak256(bytes(IShedImplementation(shedFactory.implementation()).VERSION()));
 
     (aliceEoa, alicePk) = makeAddrAndKey("e2e-alice");
     (bobEoa, bobPk) = makeAddrAndKey("e2e-bob");
@@ -318,7 +333,7 @@ abstract contract PrivateTradeE2EBase is Test {
     returns (bytes32)
   {
     bytes32 domainSeparator =
-      keccak256(abi.encode(EIP712_DOMAIN_TYPE_HASH, keccak256("COWShed"), keccak256("2.1.0"), block.chainid, shed));
+      keccak256(abi.encode(EIP712_DOMAIN_TYPE_HASH, keccak256("COWShed"), shedDomainVersion, block.chainid, shed));
 
     bytes32[] memory callHashes = new bytes32[](calls.length);
     for (uint256 i = 0; i < calls.length; ++i) {
