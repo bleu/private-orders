@@ -21,6 +21,7 @@ import {IConditionalOrder} from "composable-cow/interfaces/IConditionalOrder.sol
 import {PrivateTradeWrapper} from "../../src/PrivateTradeWrapper.sol";
 import {PrivateTradeOrder} from "../../src/PrivateTradeOrder.sol";
 import {PrivateTradeLib} from "../../src/libraries/PrivateTradeLib.sol";
+import {PrivateTradeBuilder} from "../../src/libraries/PrivateTradeBuilder.sol";
 import {PrivateOffer, PrivateTradeTerms, PrivateTradeRole} from "../../src/interfaces/IPrivateTrade.sol";
 
 import {GPv2TradeEncoder} from "../../src/vendor/GPv2TradeEncoder.sol";
@@ -229,13 +230,14 @@ abstract contract PrivateTradeTestBase is Test {
     interactions = [new GPv2Interaction.Data[](0), new GPv2Interaction.Data[](0), new GPv2Interaction.Data[](0)];
   }
 
-  function _wrapperData(PrivateTradeTerms memory terms) internal pure returns (bytes memory) {
-    return abi.encode(PrivateTradeLib.offerId(terms.offer), terms);
+  /// @dev Delegates to the production builder so the harness cannot drift from it.
+  function _wrapperData(PrivateTradeTerms memory terms) internal view returns (bytes memory) {
+    return PrivateTradeBuilder.wrapperData(terms, address(wrapper));
   }
 
   /// @dev The bundle chain for a single private trade wrapper. No next-wrapper address follows,
   /// because the wrapper only runs as the final bundle.
-  function _chainedWrapperData(PrivateTradeTerms memory terms) internal pure returns (bytes memory) {
+  function _chainedWrapperData(PrivateTradeTerms memory terms) internal view returns (bytes memory) {
     bytes memory data = _wrapperData(terms);
     return abi.encodePacked(uint16(data.length), data);
   }

@@ -4,6 +4,7 @@ pragma solidity >=0.8.0 <0.9.0;
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 import {PrivateTradeTerms} from "../interfaces/IPrivateTrade.sol";
+import {PrivateTradeProposal} from "./PrivateTradeProposal.sol";
 
 /// @title PrivateTradeAppData
 /// @notice Builds the order appData document that declares a private trade bundle.
@@ -30,8 +31,27 @@ library PrivateTradeAppData {
   string internal constant SCHEMA_VERSION = "0.9.0";
 
   /// @dev The bytes a wrapper expects in `wrappers[].data`.
+  /// @dev No sub-solver proposal attached: the wrapper skips on-chain proposal verification.
   function wrapperData(bytes32 declaredOfferId, PrivateTradeTerms memory terms) internal pure returns (bytes memory) {
-    return abi.encode(declaredOfferId, terms);
+    return wrapperData(
+      declaredOfferId,
+      terms,
+      PrivateTradeProposal.Proposal({
+        wrapper: address(0),
+        termsHash: bytes32(0),
+        validUntil: 0,
+        signature: ""
+      })
+    );
+  }
+
+  /// @dev With a BYOS sub-solver proposal attached.
+  function wrapperData(
+    bytes32 declaredOfferId,
+    PrivateTradeTerms memory terms,
+    PrivateTradeProposal.Proposal memory proposal
+  ) internal pure returns (bytes memory) {
+    return abi.encode(declaredOfferId, terms, proposal);
   }
 
   /// @notice The canonical appData document for a single-bundle private trade.

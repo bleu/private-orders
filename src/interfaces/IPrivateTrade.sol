@@ -99,6 +99,21 @@ error PrivateTrade_Expired();
 /// @dev Raised when `settleData` is not a call to `settle`.
 error PrivateTrade_InvalidSettleData();
 
+/// @dev Raised when an attached sub-solver proposal names a different wrapper.
+error PrivateTrade_ProposalWrongWrapper(address expected, address actual);
+
+/// @dev Raised when an attached sub-solver proposal has expired.
+error PrivateTrade_ProposalExpired(uint256 validUntil);
+
+/// @dev Raised when the executed settlement is not the one the sub-solver signed.
+error PrivateTrade_ProposalPayloadMismatch(bytes32 expected, bytes32 actual);
+
+/// @dev Raised when an attached sub-solver proposal signature does not recover.
+error PrivateTrade_ProposalBadSignature();
+
+/// @notice Emitted when a signed sub-solver proposal was verified and executed, for attribution.
+event PrivateTradeSubmitted(address indexed subSolver, bytes32 indexed offerId);
+
 /// @dev Raised when the two orders do not commit to the same appData document.
 error PrivateTrade_AppDataMismatch(bytes32 makerAppData, bytes32 takerAppData);
 

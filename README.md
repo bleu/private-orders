@@ -75,24 +75,53 @@ Two consequences of the framework that this design takes seriously:
    re-check the published terms against the offer each party actually authorised in
    `ComposableCoW`.
 
-## The submitter
+## Who submits
 
-`PrivateTradeSubmitter` is a deployed, stateless contract that relays both Shed hook bundles and
-then calls `wrappedSettle`. Deploy it once, allowlist it once, and after that **anyone** can execute
-a private trade that both parties already signed: the link service, either counterparty, or a bot.
+An Atomic Bundle needs an authenticated caller, and the wrapper itself must be allowlisted because it
+calls `settle`. The natural answer is **BYOS** rather than a bespoke allowlisted contract: BYOS is
+already a bonded, allowlisted solver, and BYOS's own integration guide states the point of it —
+*"You do not need a CoW solver seat, an allowlist entry, or a relationship with CoW DAO. You need an
+address, collateral in the Escrow, and the ability to sign EIP-712 messages."*
 
-It holds no funds, keeps no state, and owns no keys, so there is no account to compromise. It is
-also deliberately narrow — the only calls it can make are `COWShedFactory.executeHooks` (owner-signed
-bundles) and `PrivateTradeWrapper.wrappedSettle` (on-chain validated pair). It cannot call
-`GPv2Settlement.settle` directly, so allowlisting it grants less power than allowlisting a solver.
+So a private-trade sub-solver is an ordinary key with escrow. The tests assert it holds **no**
+allowlist entry.
 
-Retrying is safe: a bundle whose nonce is already consumed is skipped, so a resubmission only
-re-fails if the pair itself already settled.
+| | Dedicated submitter contract | BYOS |
+| --- | --- | --- |
+| Allowlist entries | wrapper + submitter | wrapper only |
+| Revert accountability | none | escrow debit, existing penalty framework |
+| Fee path | none | BYOS's fee mechanism |
+| Permissionless relay | yes, anyone | BYOS only (liveness, not safety) |
+| New audited code | ~60 lines | none |
 
-`PrivateTradeBuilder` is the pure library behind it, and the single place the payload is
-constructed: both orders, both EIP-1271 signatures, the clearing prices, the settlement calldata and
-the bundle chain. It needs no private key, because order authorisation comes from the Shed-owned
-conditional orders rather than from an ECDSA signature.
+`PrivateTradeSubmitter` remains in the tree as an optional permissionless fallback for deployments
+that do not want BYOS in the path. It costs one extra allowlist entry.
+
+### The proposal
+
+BYOS routes auction orderflow through a Trampoline sandbox under an invariant of *one order, one
+trampoline call, one sub-solver*. A private trade breaks that shape — two orders, no external
+liquidity, nothing for a Trampoline to do — so it needs its own proposal type, which BYOS's design
+notes call a signed-schema change.
+
+```
+PrivateTradeProposal(address wrapper, bytes32 termsHash, uint256 validUntil)
+domain: name "BYOS", version "0.2", chainId, verifyingContract = the wrapper
+```
+
+Three things worth stating:
+
+- **The wrapper verifies the signature on-chain**, not just BYOS off-chain. That is the same job
+  `interactionsHash` does for routing proposals: it stops the operator from running something other
+  than what the sub-solver signed and then debiting escrow for the revert.
+- **The commitment is to the pair** — `keccak256(abi.encode(offerId, taker, wrapper))` — and not to
+  the settlement calldata. The proposal travels *inside* the orders' appData, and the calldata
+  contains those orders, so hashing the calldata would be circular. The pair is sufficient: the
+  wrapper derives exact amounts, both owners, both tokens and reciprocity from it, so no other valid
+  execution of the same pair exists.
+- **No nonce is enforced on-chain.** BYOS needs one because a routing proposal can be replayed inside
+  a tradeless settlement. A private trade cannot be: both orders are fill-or-kill and the settlement
+  marks them filled, so a replay already reverts with `GPv2: order filled`.
 
 ## Paths covered
 
@@ -103,7 +132,8 @@ conditional orders rather than from an ECDSA signature.
 | Driver wire format | `test/PrivateTradeDriverFormat.t.sol` | The bytes the driver actually produces, including the appended auction id |
 | EOA -> CoW Shed | `test/PrivateTradeShed.t.sol` | Real `COWShedFactory` + `COWShedForComposableCoW`, owner-signed bundles, relayed by anyone |
 | Offline chain | `test/offline/PrivateTradeOffline.t.sol` | The real settlement, shed factory, ComposableCoW and tokens on `bleu/cow-offline-mode` |
-| Submitter | `src/PrivateTradeSubmitter.sol`, driven by both e2e suites | A deployed, allowlisted, keyless relay executed by a caller that is not a solver |
+| BYOS proposal | `src/libraries/PrivateTradeProposal.sol`, driven by both e2e suites | A sub-solver with no allowlist entry signs; the allowlisted submitter executes; the wrapper verifies on-chain |
+| Submitter (fallback) | `src/PrivateTradeSubmitter.sol`, driven by both e2e suites | A deployed, allowlisted, keyless relay executed by a caller that is not a solver |
 | Payload builder | `test/PrivateTradeBuilder.t.sol` | The production builder agrees with the fixtures the suites are written against |
 
 `./scripts/offline-e2e.sh` runs the last one; see [docs/OFFLINE.md](docs/OFFLINE.md).
@@ -132,6 +162,8 @@ conditional orders rather than from an ECDSA signature.
 | `test_restrictedOfferRejectsDifferentTaker` | On-chain counterparty restriction |
 | `test_replayReverts` | A settled pair cannot be replayed |
 | `test_rejectsBeingAnIntermediateBundle` | Refuses to run if another bundle sits between it and the settlement |
+| `test_byosProposalSubmissionOn*` | Sub-solver with no allowlist entry signs; wrapper verifies the proposal on-chain; trade settles |
+| `test_byosProposalTamperingRejectedOn*` | A signature over a different pair does not execute this one |
 | `test_rejectsNonReciprocalClearingPrices` | No price slippage between the two legs |
 | `test_rejectsDuplicateMakerOrder` | Order index matters; shapes are exact |
 | `test_rejectsSingleTrade` | Exactly two trades |
@@ -174,13 +206,15 @@ test/utils/                         harness: contract wallet, ERC20, flags encod
 
 1. **The link service.** Holding the offer, generating the link, collecting the acceptance, then
    handing both halves to the submitter. The on-chain half is done; this is the product half.
-2. **Atomic funding inside the settlement.** Approvals and order authorisation are atomic with the
+2. **BYOS-side proposal support.** The proposal type and its on-chain verification exist here; BYOS
+   needs a matching proposal kind and a submission path that is not driven by an auction.
+3. **Atomic funding inside the settlement.** Approvals and order authorisation are atomic with the
    trade only if the signed bundles travel in the bundle chain. Funding is currently a separate
    transfer into the Shed. The Shed is owner-controlled, so nothing is stranded, but it is two
    transactions instead of one.
-3. **Allowlisting and audit.** Production bundles must pass a security audit and be approved by CoW
+4. **Allowlisting and audit.** Production bundles must pass a security audit and be approved by CoW
    DAO, and the submitter must be allowlisted. Neither governance step is in scope here.
-4. **Non-ERC20 assets.** NFTs, game items, partial fills.
+5. **Non-ERC20 assets.** NFTs, game items, partial fills.
 
 Pinned to `cowprotocol/contracts@main`, `cowprotocol/composable-cow@main`, `cowdao-grants/cow-shed@main`,
 and the upstream `CowWrapper.sol`.

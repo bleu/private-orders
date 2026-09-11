@@ -9,6 +9,7 @@ import {Call} from "cow-shed/ICOWAuthHook.sol";
 
 import {PrivateTradeTerms} from "../interfaces/IPrivateTrade.sol";
 import {PrivateTradeBuilder} from "./PrivateTradeBuilder.sol";
+import {PrivateTradeProposal} from "./PrivateTradeProposal.sol";
 import {ICowWrapper} from "../vendor/CowWrapper.sol";
 
 /// @title PrivateTradeSubmission
@@ -54,6 +55,9 @@ library PrivateTradeSubmission {
     address handler;
     address shedFactory;
     address settlement;
+    /// @dev A signed BYOS sub-solver proposal. Leave the signature empty for a permissionless
+    /// submission with no on-chain proposal check.
+    PrivateTradeProposal.Proposal proposal;
   }
 
   /// @notice Relay both hook bundles, then submit the pair. Safe to call again if the first
@@ -72,14 +76,15 @@ library PrivateTradeSubmission {
   function submitPrepared(Context memory context, PrivateTradeTerms memory terms) internal returns (bytes4 magic) {
     GPv2Settlement settlement = GPv2Settlement(payable(context.settlement));
 
-    bytes32 appData = PrivateTradeBuilder.appDataHash(terms, context.wrapper);
+    bytes32 appData = PrivateTradeBuilder.appDataHash(terms, context.wrapper, context.proposal);
     (
       IConditionalOrder.ConditionalOrderParams memory makerParams,
       IConditionalOrder.ConditionalOrderParams memory takerParams
     ) = PrivateTradeBuilder.conditionalOrderParams(context.handler, terms);
 
     bytes memory data = PrivateTradeBuilder.settleData(settlement, terms, makerParams, takerParams, appData);
-    bytes memory chain = PrivateTradeBuilder.chainedWrapperData(terms, context.wrapper);
+    bytes memory chain =
+      PrivateTradeBuilder.chainedWrapperData(terms, context.wrapper, context.proposal);
 
     magic = ICowWrapper(context.wrapper).wrappedSettle(data, chain);
   }

@@ -25,12 +25,14 @@ import {
   PrivateOffer,
   PrivateTradeTerms,
   PrivateTradeRole,
-  PrivateTrade_NoActiveTrade
+  PrivateTrade_NoActiveTrade,
+  PrivateTrade_ProposalPayloadMismatch
 } from "../../src/interfaces/IPrivateTrade.sol";
 
 import {GPv2TradeEncoder} from "../../src/vendor/GPv2TradeEncoder.sol";
 import {PrivateTradeBuilder} from "../../src/libraries/PrivateTradeBuilder.sol";
 import {PrivateTradeSubmission} from "../../src/libraries/PrivateTradeSubmission.sol";
+import {PrivateTradeProposal} from "../../src/libraries/PrivateTradeProposal.sol";
 import {PrivateTradeSubmitter} from "../../src/PrivateTradeSubmitter.sol";
 
 /// @dev The Shed implementation states its own EIP-712 domain version, and the deployed version
@@ -82,8 +84,13 @@ abstract contract PrivateTradeE2EBase is Test {
   address internal aliceShed;
   address internal bobShed;
 
-  /// @dev Stands in for the bonded solver that relays the settlement.
+  /// @dev Stands in for the bonded solver that relays the settlement. This is BYOS.
   address internal solver;
+
+  /// @dev Stands in for a BYOS sub-solver: an ordinary key with no CoW allowlist entry at all.
+  /// Only its EIP-712 signature matters.
+  address internal subSolver;
+  uint256 internal subSolverPk;
 
   /// @dev `keccak256` of the Shed's EIP-712 domain version, read from the deployed implementation.
   bytes32 internal shedDomainVersion;
@@ -125,8 +132,13 @@ abstract contract PrivateTradeE2EBase is Test {
     (aliceEoa, alicePk) = makeAddrAndKey("e2e-alice");
     (bobEoa, bobPk) = makeAddrAndKey("e2e-bob");
     solver = makeAddr("e2e-solver");
+    (subSolver, subSolverPk) = makeAddrAndKey("byos-sub-solver");
     vm.prank(manager);
     auth.addSolver(solver);
+
+    // The sub-solver deliberately gets no allowlist entry: BYOS's whole point is that it does not
+    // need one. Only the wrapper (a bundle) and the submitter (BYOS) are allowlisted.
+    assertFalse(auth.isSolver(subSolver), "sub-solver must not need an allowlist entry");
 
     aliceShed = shedFactory.proxyOf(aliceEoa);
     bobShed = shedFactory.proxyOf(bobEoa);
@@ -144,7 +156,8 @@ abstract contract PrivateTradeE2EBase is Test {
       wrapper: address(wrapper),
       handler: address(handler),
       shedFactory: address(shedFactory),
-      settlement: address(settlement)
+      settlement: address(settlement),
+      proposal: PrivateTradeBuilder.unsignedProposal()
     });
   }
 
@@ -231,6 +244,45 @@ abstract contract PrivateTradeE2EBase is Test {
     // The pair cannot settle twice.
     vm.expectRevert(bytes("GPv2: order filled"));
     submitter.submitPrepared(_submitterContext(), signed.terms);
+
+    assertEq(IERC20(DAI).balanceOf(aliceShed), DAI_AMOUNT, "alice shed did not receive DAI");
+    assertEq(IERC20(USDC).balanceOf(bobShed), USDC_AMOUNT, "bob shed did not receive USDC");
+  }
+
+  /// @dev The full BYOS path: a sub-solver that holds no allowlist entry relays the parties'
+  /// bundles and signs a proposal; the allowlisted submitter executes it; the wrapper verifies the
+  /// proposal on-chain. `tamper` signs a commitment to a different pair.
+  function _runByosProposal(bool tamper) internal {
+    SignedTrade memory signed = _prepareTrade();
+    PrivateTradeSubmission.Context memory context = _submitterContext();
+
+    // Relaying is permissionless, so the sub-solver does it.
+    PrivateTradeSubmission.relayBundles(context, signed.maker, signed.taker);
+
+    bytes32 pairHash = PrivateTradeBuilder.termsHash(signed.terms, address(wrapper));
+    PrivateTradeProposal.Proposal memory proposal = PrivateTradeProposal.Proposal({
+      wrapper: address(wrapper),
+      termsHash: tamper ? keccak256("a different pair") : pairHash,
+      validUntil: block.timestamp + 30 minutes,
+      signature: ""
+    });
+    (uint8 v, bytes32 r, bytes32 s) =
+      vm.sign(subSolverPk, PrivateTradeProposal.digest(proposal, address(wrapper)));
+    proposal.signature = abi.encodePacked(r, s, v);
+
+    context.proposal = proposal;
+
+    if (tamper) {
+      vm.expectRevert(
+        abi.encodeWithSelector(
+          PrivateTrade_ProposalPayloadMismatch.selector, pairHash, proposal.termsHash
+        )
+      );
+      submitter.submitPrepared(context, signed.terms);
+      return;
+    }
+
+    submitter.submitPrepared(context, signed.terms);
 
     assertEq(IERC20(DAI).balanceOf(aliceShed), DAI_AMOUNT, "alice shed did not receive DAI");
     assertEq(IERC20(USDC).balanceOf(bobShed), USDC_AMOUNT, "bob shed did not receive USDC");

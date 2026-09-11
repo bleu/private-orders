@@ -70,4 +70,17 @@ contract PrivateTradeMainnetForkTest is PrivateTradeE2EBase {
     if (!active) return;
     _runResubmitIsSafe();
   }
+
+  /// @dev A BYOS sub-solver with no allowlist entry signs; the allowlisted submitter executes;
+  /// the wrapper verifies the proposal on-chain.
+  function test_byosProposalSubmissionOnMainnetFork() public {
+    if (!active) return;
+    _runByosProposal(false);
+  }
+
+  /// @dev A signature over a different pair must not execute this one.
+  function test_byosProposalTamperingRejectedOnMainnetFork() public {
+    if (!active) return;
+    _runByosProposal(true);
+  }
 }

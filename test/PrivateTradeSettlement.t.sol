@@ -26,6 +26,7 @@ import {
   PrivateTrade_InvalidSettleData
 } from "../src/interfaces/IPrivateTrade.sol";
 import {PrivateTradeLib} from "../src/libraries/PrivateTradeLib.sol";
+import {PrivateTradeBuilder} from "../src/libraries/PrivateTradeBuilder.sol";
 import {CowWrapper, ICowWrapper} from "../src/vendor/CowWrapper.sol";
 import {PrivateTradeTestBase} from "./utils/PrivateTradeTestBase.sol";
 
@@ -227,7 +228,8 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
 
   function test_validateWrapperDataRejectsTamperedOfferId() public {
     PrivateTradeTerms memory terms = _terms(address(bob), address(bob));
-    bytes memory data = abi.encode(keccak256("not-the-offer"), terms);
+    bytes memory data =
+      abi.encode(keccak256("not-the-offer"), terms, PrivateTradeBuilder.unsignedProposal());
 
     vm.expectRevert(PrivateTrade_OfferIdMismatch.selector);
     wrapper.validateWrapperData(data);

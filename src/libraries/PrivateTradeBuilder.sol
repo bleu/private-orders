@@ -14,6 +14,7 @@ import {IConditionalOrder} from "composable-cow/interfaces/IConditionalOrder.sol
 import {PrivateOffer, PrivateTradeTerms, PrivateTradeRole} from "../interfaces/IPrivateTrade.sol";
 import {PrivateTradeLib} from "./PrivateTradeLib.sol";
 import {PrivateTradeAppData} from "./PrivateTradeAppData.sol";
+import {PrivateTradeProposal} from "./PrivateTradeProposal.sol";
 import {GPv2TradeEncoder} from "../vendor/GPv2TradeEncoder.sol";
 
 /// @title PrivateTradeBuilder
@@ -110,7 +111,16 @@ library PrivateTradeBuilder {
   /// @notice The bundle chain for a single-wrapper private trade: `[uint16 len][data]`.
   /// @dev The wrapper must be the last bundle in the chain, so no next-wrapper address follows.
   function chainedWrapperData(PrivateTradeTerms memory terms, address wrapper) internal pure returns (bytes memory) {
-    bytes memory data = wrapperData(terms, wrapper);
+    return chainedWrapperData(terms, wrapper, _noProposal());
+  }
+
+  /// @dev As above, carrying a signed BYOS sub-solver proposal.
+  function chainedWrapperData(
+    PrivateTradeTerms memory terms,
+    address wrapper,
+    PrivateTradeProposal.Proposal memory proposal
+  ) internal pure returns (bytes memory) {
+    bytes memory data = wrapperData(terms, wrapper, proposal);
     return abi.encodePacked(uint16(data.length), data);
   }
 
@@ -119,9 +129,44 @@ library PrivateTradeBuilder {
     return PrivateTradeAppData.wrapperData(PrivateTradeLib.offerId(terms.offer), terms);
   }
 
+  function wrapperData(
+    PrivateTradeTerms memory terms,
+    address wrapper,
+    PrivateTradeProposal.Proposal memory proposal
+  ) internal pure returns (bytes memory) {
+    return PrivateTradeAppData.wrapperData(PrivateTradeLib.offerId(terms.offer), terms, proposal);
+  }
+
   /// @notice The appData hash both orders must carry.
   function appDataHash(PrivateTradeTerms memory terms, address wrapper) internal pure returns (bytes32) {
-    return PrivateTradeAppData.documentHash(wrapper, wrapperData(terms, wrapper));
+    return appDataHash(terms, wrapper, _noProposal());
+  }
+
+  function appDataHash(
+    PrivateTradeTerms memory terms,
+    address wrapper,
+    PrivateTradeProposal.Proposal memory proposal
+  ) internal pure returns (bytes32) {
+    return PrivateTradeAppData.documentHash(wrapper, wrapperData(terms, wrapper, proposal));
+  }
+
+  /// @dev The commitment a sub-solver signs, recomputable by the wrapper from its own state.
+  function termsHash(PrivateTradeTerms memory terms, address wrapper) internal pure returns (bytes32) {
+    return PrivateTradeProposal.termsHash(PrivateTradeLib.offerId(terms.offer), terms.taker, wrapper);
+  }
+
+  /// @dev An unattached proposal: the wrapper skips on-chain proposal verification.
+  function unsignedProposal() internal pure returns (PrivateTradeProposal.Proposal memory) {
+    return _noProposal();
+  }
+
+  function _noProposal() private pure returns (PrivateTradeProposal.Proposal memory) {
+    return PrivateTradeProposal.Proposal({
+      wrapper: address(0),
+      termsHash: bytes32(0),
+      validUntil: 0,
+      signature: ''
+    });
   }
 
   function emptyInteractions() internal pure returns (GPv2Interaction.Data[][3] memory result) {

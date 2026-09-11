@@ -25,9 +25,15 @@ import {
   PrivateTrade_BadOffer,
   PrivateTrade_Expired,
   PrivateTrade_InvalidSettleData,
-  PrivateTrade_AppDataMismatch
+  PrivateTrade_AppDataMismatch,
+  PrivateTrade_ProposalWrongWrapper,
+  PrivateTrade_ProposalExpired,
+  PrivateTrade_ProposalPayloadMismatch,
+  PrivateTrade_ProposalBadSignature,
+  PrivateTradeSubmitted
 } from "./interfaces/IPrivateTrade.sol";
 import {PrivateTradeLib} from "./libraries/PrivateTradeLib.sol";
+import {PrivateTradeProposal} from "./libraries/PrivateTradeProposal.sol";
 
 /// @title PrivateTradeWrapper
 /// @notice A CoW Atomic Bundle. It is the only way a pair of private trade orders can be settled.
@@ -74,7 +80,11 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
   /// @inheritdoc ICowWrapper
   /// @param wrapperData `abi.encode(bytes32 declaredOfferId, PrivateTradeTerms terms)`
   function validateWrapperData(bytes calldata wrapperData) external pure override {
-    (bytes32 declaredOfferId, PrivateTradeTerms memory terms) = abi.decode(wrapperData, (bytes32, PrivateTradeTerms));
+    (
+      bytes32 declaredOfferId,
+      PrivateTradeTerms memory terms,
+
+    ) = abi.decode(wrapperData, (bytes32, PrivateTradeTerms, PrivateTradeProposal.Proposal));
     _validateTerms(declaredOfferId, terms);
   }
 
@@ -85,8 +95,13 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
   {
     if (remainingWrapperData.length != 0) revert PrivateTrade_NotLastWrapper();
 
-    (bytes32 declaredOfferId, PrivateTradeTerms memory terms) = abi.decode(wrapperData, (bytes32, PrivateTradeTerms));
+    (
+      bytes32 declaredOfferId,
+      PrivateTradeTerms memory terms,
+      PrivateTradeProposal.Proposal memory proposal
+    ) = abi.decode(wrapperData, (bytes32, PrivateTradeTerms, PrivateTradeProposal.Proposal));
     bytes32 offerId_ = _validateTerms(declaredOfferId, terms);
+    _validateProposal(proposal, terms, offerId_);
 
     (
       IERC20[] memory tokens,
@@ -107,6 +122,36 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
   }
 
   // --- validation
+
+  /// @dev A BYOS sub-solver signs the settlement it is submitting, so that BYOS cannot run a
+  /// different payload under the same signature and then debit escrow for the revert. This is the
+  /// same job BYOS's `interactionsHash` does for routing proposals, checked on-chain here.
+  ///
+  /// An unsigned proposal skips the check: the trade is still fully validated, and anyone may
+  /// submit a pair both parties signed.
+  function _validateProposal(
+    PrivateTradeProposal.Proposal memory proposal,
+    PrivateTradeTerms memory terms,
+    bytes32 offerId_
+  ) private {
+    if (PrivateTradeProposal.isUnsigned(proposal)) return;
+
+    if (proposal.wrapper != address(this)) {
+      revert PrivateTrade_ProposalWrongWrapper(address(this), proposal.wrapper);
+    }
+    if (block.timestamp > proposal.validUntil) revert PrivateTrade_ProposalExpired(proposal.validUntil);
+
+    bytes32 expected = PrivateTradeProposal.termsHash(offerId_, terms.taker, address(this));
+    if (proposal.termsHash != expected) {
+      revert PrivateTrade_ProposalPayloadMismatch(expected, proposal.termsHash);
+    }
+
+    address subSolver = PrivateTradeProposal.recover(proposal, address(this));
+    if (subSolver == address(0)) revert PrivateTrade_ProposalBadSignature();
+
+    // Attribution: the recovered signer is the identity, exactly as in BYOS's own model.
+    emit PrivateTradeSubmitted(subSolver, offerId_);
+  }
 
   /// @dev Structural checks on the terms, plus the commitment check. Deterministic by design:
   /// `validateWrapperData` must give the same answer for the same input, so expiry is not
