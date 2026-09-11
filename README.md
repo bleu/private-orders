@@ -148,18 +148,17 @@ test/utils/                         harness: contract wallet, ERC20, flags encod
 
 ## Not built yet
 
-1. **A sub-solver.** A private trade needs a solver that submits the two orders as fulfillments with
-   no interactions. The built-in baseline solver routes through AMM liquidity and adds interactions,
-   which this wrapper rejects by design. A minimal solver is the next artifact.
-2. **Order submission.** Nothing here posts an order to the orderbook. The appData document is built
-   and validated, but the `PUT /api/v1/app_data/{hash}` + `POST /api/v1/orders` sequence lives in the
-   offline repo's scripts, not here.
+1. **The submitter.** One allowlisted account that calls `wrappedSettle` with the two signed bundles.
+   Nothing more: no orderbook, no auction, no solver competition. BYOS is the natural fit, since it
+   is already a bonded, allowlisted solver.
+2. **The link service.** Holding the offer, generating the link, collecting the acceptance, then
+   handing both halves to the submitter. The on-chain half is done; this is the product half.
 3. **Atomic funding inside the settlement.** Approvals and order authorisation are atomic with the
-   trade only if the signed bundles are carried in the bundle chain. Funding is currently a separate
+   trade only if the signed bundles travel in the bundle chain. Funding is currently a separate
    transfer into the Shed. The Shed is owner-controlled, so nothing is stranded, but it is two
    transactions instead of one.
 4. **Allowlisting and audit.** Production bundles must pass a security audit and be approved by CoW
-   DAO. Neither the audit nor the governance step is in scope here.
+   DAO, and the submitter must be allowlisted. Neither governance step is in scope here.
 5. **Non-ERC20 assets.** NFTs, game items, partial fills.
 
 Pinned to `cowprotocol/contracts@main`, `cowprotocol/composable-cow@main`, `cowdao-grants/cow-shed@main`,

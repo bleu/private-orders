@@ -20,19 +20,36 @@ Real `GPv2Settlement` (`0x9008…ab41`), real `GPv2AllowListAuthentication` (the
 wrapper by impersonating the manager), real `ComposableCoW`, real `COWShedFactoryForComposableCoW`
 at `0x5E284e80F3bd6A7D80A8500D9c49878028110848`, and real USDC/DAI seeded with `deal`.
 
+## Regenerating the offline stack's state
+
+The repo ships a prebuilt `state/anvil-state.json`, and `chain-deployer` short-circuits whenever it
+exists. Regenerating requires **an archive-capable mainnet RPC** (`MAINNET_RPC_URL`), because the
+deploy replays mainnet transactions onto anvil. A public endpoint is not enough: the run fails at
+`Error: tx not found` during the CoW core deployment. Back up the state file before trying.
+
+That shipped state is also stale in one way that matters here:
+
+- **It deploys the plain `COWShed`, not `COWShedForComposableCoW`.** The plain implementation has no
+  `isValidSignature`, so a Shed on it cannot own a ComposableCoW order.
+- **Its Shed is version 2.0.0**, while the current `cow-shed` is 2.1.0, and the version is inside the
+  EIP-712 domain. Signing with the wrong version fails as `InvalidSignature()`.
+- **`COWSHED_COMPOSABLE_COW_FACTORY_ADDRESS` is read but never deployed or configured.**
+  `scripts/orders/composable-cow/*.ts` and `test/utils/loadAddresses.ts` all expect it.
+
+`contracts/script/DeployCoWShed.s.sol` is patched to deploy `COWShedForComposableCoW`, so a
+regeneration with an archive RPC produces a stack whose Shed can own conditional orders. Until then,
+`test/offline/*` deploys the ComposableCoW Shed itself. It also reads `VERSION()` from the deployed
+implementation instead of hardcoding the domain version.
+
 ## Offline stack notes
 
-Two things about the offline stack are worth knowing before you debug it:
+The stack's `db` service publishes host port 5432, which collides with any local Postgres. Set
+`PORT_DB=5433` in the offline repo's `.env`.
 
-- **It deploys the plain `COWShed`, not `COWShedForComposableCoW`.** That implementation has no
-  `isValidSignature`, so a Shed there cannot own a ComposableCoW order. The test deploys the
-  ComposableCoW variant itself; the factory is permissionless.
-- **Its deployed Shed is version 2.0.0**, while the current `cow-shed` is 2.1.0, and the version is
-  inside the EIP-712 domain. Signing with the wrong version fails as `InvalidSignature()`. The test
-  reads `VERSION()` from the deployed implementation instead of hardcoding it.
-
-Also: the stack's `db` service publishes host port 5432, which collides with any local Postgres.
-Set `PORT_DB=5433` in the offline repo's `.env`.
+The Rust workspace needs about 25 GB free, and a container VM with more than the default 2 CPUs
+(`colima start --cpu 6 --memory 12`). `modules/services/rust-toolchain` pins `stable`, which is too
+new for `alloy-signer-aws 1.1.0`; the Dockerfile patch pins 1.89.0 and sets `RUSTUP_TOOLCHAIN` so the
+toolchain file cannot override it.
 
 
 This runs a private trade against the live `bleu/cow-offline-mode` chain: the real `GPv2Settlement`,

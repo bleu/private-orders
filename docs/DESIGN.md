@@ -87,41 +87,63 @@ this does not.
 Interactions are rejected outright, in all three phases. A settlement that contains a Uniswap call
 is not a bilateral trade, whatever the orders say.
 
-## Integrating with the orderbook and driver
+## How a private trade executes
 
-Three findings from reading `cowprotocol/services` at the revision `bleu/cow-offline-mode` pins
-(`3480ee76`, 2025-12-18).
+There is no orderbook, no auction, no price discovery and no solver competition. That is the premise
+of the RFC, and the on-chain design depends on it: a private trade's orders are valid *only* inside
+the settlement that pairs them, so publishing them serves no purpose.
 
-**Orders must skip creation-time signature validation.** This is not a bug in the design, it is the
-design: an order is valid *only* inside the settlement that pairs it, so it cannot produce a magic
-value when the orderbook calls `isValidSignature` during `POST /orders`. CoW already has the flag for
-this exact class of order — `--eip1271-skip-creation-validation`
-(`crates/orderbook/src/arguments.rs:111-114`), settable as
-`EIP1271_SKIP_CREATION_VALIDATION=true`. Nothing about on-chain enforcement changes: the settlement
-still refuses any order that is not part of the exact pair. Anyone who wants the strongest possible
-counterparty guarantee needs this flag set, and that is a real integration cost worth stating in the
-RFC.
+The path is:
 
-**The bundle travels in appData, and the solver must echo it back.** The driver reads
-`metadata.wrappers` from the order's appData and forwards it per order in the auction
-(`crates/solvers-dto/src/auction.rs`), the solver returns a flat `wrappers` list in its solution, and
-the driver sets `to = wrappers[0].address` and encodes `wrappedSettle(settleData, chainedWrapperData)`.
-The wire format uses `address`, not `target`. Full app data must be registered
-(`PUT /api/v1/app_data/{hash}`) or posted inline; with only the hash available the driver sees no
-wrappers and settles silently without them.
+```
+1. Maker creates an offer          -> service stores it, returns a link
+2. Taker opens the link, accepts   -> service now holds both halves
+3. Both parties sign               -> CoW Shed hook bundles (approve + authorise the order)
+4. An allowlisted submitter calls  -> PrivateTradeWrapper.wrappedSettle(settleData, chainedWrapperData)
+5. GPv2Settlement settles          -> both legs move, or nothing does
+```
+
+Step 4 is the whole integration. The orders never become public, so there is nothing to discover,
+quote, rank or compete over.
+
+**One allowlisted submitter is required.** `CowWrapper.wrappedSettle` is `external` on the base
+contract and not `virtual`, so it enforces `AUTHENTICATOR.isSolver(msg.sender)`, and the wrapper
+itself must be allowlisted because it becomes the direct caller of `GPv2Settlement.settle`. That is
+two entries in the same list CoW already maintains for solvers and bundles, and it is exactly the
+role BYOS exists to fill: a bonded, already-allowlisted solver that submits on behalf of parties who
+are not.
+
+The submitter is transport, not a trust anchor. It cannot fill one half without the other, cannot
+change the terms, cannot redirect the proceeds, and cannot reuse either order elsewhere — the wrapper
+and the order handlers refuse all of that on-chain. A misbehaving submitter can only decline to
+submit.
+
+## If you route it through the standard flow instead
+
+This is a rejected alternative, recorded because the findings are concrete and the temptation is
+real: an order that enters the orderbook becomes visible to every solver, which is the opposite of
+the premise, and three further obstacles follow.
+
+**Creation-time signature validation can never pass.** An order valid only inside its settlement
+cannot return a magic value when the orderbook calls `isValidSignature` during `POST /orders`. CoW
+has the flag for this class of order (`--eip1271-skip-creation-validation`,
+`crates/orderbook/src/arguments.rs:111-114`), but relaxing it means the orders are public.
 
 **The stock solver cannot serve a private trade.** The baseline solver routes through AMM liquidity
-and appends interactions. This wrapper rejects interactions outright, so a private trade needs a
-solver that submits exactly two fulfillments and nothing else. That solver is mechanical — it reads
-the pair out of the auction and echoes the wrappers — but it does not exist yet.
+and appends interactions. The wrapper rejects interactions outright, so a bundled solution would
+need a purpose-built solver that submits exactly two fulfillments.
 
-Two open risks in the driver, neither load-bearing for this design:
+**The bundle must be echoed by the solver.** The driver reads `metadata.wrappers` from appData and
+forwards it per order, the solver returns a flat `wrappers` list, and the driver sets
+`to = wrappers[0].address`, encoding `wrappedSettle(settleData, chainedWrapperData)`. The wire format
+uses `address`, not `target` (the public docs are wrong, the code is right), and full app data must
+be registered with `PUT /api/v1/app_data/{hash}` or the driver sees no wrappers and settles without
+them.
 
-- The driver does not cross-check the solver's `wrappers` against the orders' appData, so a solver
-  could attach a different bundle. Irrelevant here: the wrapper validates the pair, and the orders
-  validate the wrapper's published terms.
-- `Solution::merge` keeps only the left-hand solution's wrappers, so a bundled solution that gets
-  merged can lose its bundle. Worth avoiding merges for private trades.
+Two driver behaviours worth knowing if anyone does try it: the driver never cross-checks a solver's
+`wrappers` against the orders' appData, and `Solution::merge` keeps only the left-hand solution's
+wrappers, so a merged solution can lose its bundle. Neither weakens this design, because the wrapper
+and the handlers enforce the pair regardless.
 
 ## Why not the alternatives
 
