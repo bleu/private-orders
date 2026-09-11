@@ -24,7 +24,8 @@ import {
   PrivateTrade_NotLastWrapper,
   PrivateTrade_BadOffer,
   PrivateTrade_Expired,
-  PrivateTrade_InvalidSettleData
+  PrivateTrade_InvalidSettleData,
+  PrivateTrade_AppDataMismatch
 } from "./interfaces/IPrivateTrade.sol";
 import {PrivateTradeLib} from "./libraries/PrivateTradeLib.sol";
 
@@ -192,6 +193,13 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
     }
     if (!PrivateTradeLib.isReciprocal(terms, clearingPrices[0], clearingPrices[1])) {
       revert PrivateTrade_NotReciprocal();
+    }
+
+    // Both orders must point at the same appData document, which is where the bundle declaration
+    // lives. The document hash cannot be part of the terms (that would be a cycle), so the two
+    // orders are only required to agree with each other.
+    if (trades[0].appData != trades[1].appData) {
+      revert PrivateTrade_AppDataMismatch(trades[0].appData, trades[1].appData);
     }
 
     address[2] memory expectedOwners = [terms.offer.maker, terms.taker];
