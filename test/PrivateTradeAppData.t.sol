@@ -165,10 +165,10 @@ contract PrivateTradeAppDataTest is PrivateTradeTestBase {
     bytes memory data = PrivateTradeAppData.wrapperData(PrivateTradeLib.offerId(terms.offer), terms);
     string memory document = string(PrivateTradeAppData.document(address(wrapper), data));
 
-    assertEq(vm.parseJsonString(document, ".version"), "private-trades/1");
-    assertEq(vm.parseJsonAddress(document, ".wrappers[0].target"), address(wrapper));
-    assertEq(vm.parseJsonBool(document, ".wrappers[0].isOmittable"), false);
-    assertEq(vm.parseJsonBytes(document, ".wrappers[0].data"), data);
+    assertEq(vm.parseJsonString(document, ".version"), "0.9.0");
+    assertEq(vm.parseJsonAddress(document, ".metadata.wrappers[0].address"), address(wrapper));
+    assertEq(vm.parseJsonBool(document, ".metadata.wrappers[0].isOmittable"), false);
+    assertEq(vm.parseJsonBytes(document, ".metadata.wrappers[0].data"), data);
   }
 
   // --- internals
@@ -177,8 +177,8 @@ contract PrivateTradeAppDataTest is PrivateTradeTestBase {
   /// and encode the chain with the official helper.
   function _chainFromDocument(bytes memory document) internal view returns (bytes memory) {
     string memory json = string(document);
-    address target = vm.parseJsonAddress(json, ".wrappers[0].target");
-    bytes memory data = vm.parseJsonBytes(json, ".wrappers[0].data");
+    address target = vm.parseJsonAddress(json, ".metadata.wrappers[0].address");
+    bytes memory data = vm.parseJsonBytes(json, ".metadata.wrappers[0].data");
 
     CowWrapperHelpers.WrapperCall[] memory calls = new CowWrapperHelpers.WrapperCall[](1);
     calls[0] = CowWrapperHelpers.WrapperCall({target: target, data: data});

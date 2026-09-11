@@ -92,16 +92,26 @@ abstract contract PrivateTradeTestBase is Test {
   }
 
   function _terms(address taker, address allowedTaker) internal view returns (PrivateTradeTerms memory) {
+    return _termsFor(address(alice), taker, allowedTaker);
+  }
+
+  /// @dev Same as `_terms`, but with an arbitrary maker. Used when the order owner is a CoW Shed
+  /// rather than a test wallet.
+  function _termsFor(address maker, address taker, address allowedTaker)
+    internal
+    view
+    returns (PrivateTradeTerms memory)
+  {
     return PrivateTradeTerms({
       offer: PrivateOffer({
-        maker: address(alice),
+        maker: maker,
         allowedTaker: allowedTaker,
         sellToken: address(usdc),
         sellAmount: USDC_AMOUNT,
         buyToken: address(wbtc),
         buyAmount: WBTC_AMOUNT,
         validTo: uint32(block.timestamp + 1 days),
-        salt: keccak256(abi.encode("private-trade", taker, allowedTaker))
+        salt: keccak256(abi.encode("private-trade", maker, taker, allowedTaker))
       }),
       taker: taker
     });
