@@ -228,8 +228,7 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
 
   function test_validateWrapperDataRejectsTamperedOfferId() public {
     PrivateTradeTerms memory terms = _terms(address(bob), address(bob));
-    bytes memory data =
-      abi.encode(keccak256("not-the-offer"), terms, PrivateTradeBuilder.unsignedProposal());
+    bytes memory data = abi.encode(keccak256("not-the-offer"), terms, PrivateTradeBuilder.unsignedProposal());
 
     vm.expectRevert(PrivateTrade_OfferIdMismatch.selector);
     wrapper.validateWrapperData(data);

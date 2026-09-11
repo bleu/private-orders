@@ -68,10 +68,23 @@ library PrivateTradeBuilder {
     prices[1] = terms.offer.sellAmount;
   }
 
-  /// @notice The EIP-1271 signature a Shed-owned order carries.
-  /// @dev `abi.encodePacked(owner, abi.encode(order, payload))`. The owner prefix is what
-  /// `GPv2Signing.recoverEip1271Signer` reads; the rest is what the Shed forwards to
-  /// ComposableCoW. No secret is involved.
+  /// @notice The ComposableCoW payload a Shed-owned order validates against:
+  /// `abi.encode(order, payload)`.
+  /// @dev This is what an order sent to the orderbook must carry as its signature. The driver
+  /// prepends the owner itself when encoding the settlement (`codec::signature` concatenates
+  /// `signer || data` for EIP-1271), so posting the prefixed form would double the prefix.
+  function eip1271Payload(GPv2Order.Data memory order, IConditionalOrder.ConditionalOrderParams memory params)
+    internal
+    pure
+    returns (bytes memory)
+  {
+    ComposableCoW.PayloadStruct memory payload =
+      ComposableCoW.PayloadStruct({proof: new bytes32[](0), params: params, offchainInput: ""});
+    return abi.encode(order, payload);
+  }
+
+  /// @notice The EIP-1271 signature a Shed-owned order carries on-chain, and in a JIT order spec.
+  /// @dev `abi.encodePacked(owner, payload)`.
   function eip1271Signature(
     GPv2Order.Data memory order,
     IConditionalOrder.ConditionalOrderParams memory params,
@@ -129,11 +142,11 @@ library PrivateTradeBuilder {
     return PrivateTradeAppData.wrapperData(PrivateTradeLib.offerId(terms.offer), terms);
   }
 
-  function wrapperData(
-    PrivateTradeTerms memory terms,
-    address wrapper,
-    PrivateTradeProposal.Proposal memory proposal
-  ) internal pure returns (bytes memory) {
+  function wrapperData(PrivateTradeTerms memory terms, address wrapper, PrivateTradeProposal.Proposal memory proposal)
+    internal
+    pure
+    returns (bytes memory)
+  {
     return PrivateTradeAppData.wrapperData(PrivateTradeLib.offerId(terms.offer), terms, proposal);
   }
 
@@ -142,11 +155,11 @@ library PrivateTradeBuilder {
     return appDataHash(terms, wrapper, _noProposal());
   }
 
-  function appDataHash(
-    PrivateTradeTerms memory terms,
-    address wrapper,
-    PrivateTradeProposal.Proposal memory proposal
-  ) internal pure returns (bytes32) {
+  function appDataHash(PrivateTradeTerms memory terms, address wrapper, PrivateTradeProposal.Proposal memory proposal)
+    internal
+    pure
+    returns (bytes32)
+  {
     return PrivateTradeAppData.documentHash(wrapper, wrapperData(terms, wrapper, proposal));
   }
 
@@ -161,12 +174,7 @@ library PrivateTradeBuilder {
   }
 
   function _noProposal() private pure returns (PrivateTradeProposal.Proposal memory) {
-    return PrivateTradeProposal.Proposal({
-      wrapper: address(0),
-      termsHash: bytes32(0),
-      validUntil: 0,
-      signature: ''
-    });
+    return PrivateTradeProposal.Proposal({wrapper: address(0), termsHash: bytes32(0), validUntil: 0, signature: ""});
   }
 
   function emptyInteractions() internal pure returns (GPv2Interaction.Data[][3] memory result) {

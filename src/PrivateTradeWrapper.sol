@@ -80,11 +80,8 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
   /// @inheritdoc ICowWrapper
   /// @param wrapperData `abi.encode(bytes32 declaredOfferId, PrivateTradeTerms terms)`
   function validateWrapperData(bytes calldata wrapperData) external pure override {
-    (
-      bytes32 declaredOfferId,
-      PrivateTradeTerms memory terms,
-
-    ) = abi.decode(wrapperData, (bytes32, PrivateTradeTerms, PrivateTradeProposal.Proposal));
+    (bytes32 declaredOfferId, PrivateTradeTerms memory terms,) =
+      abi.decode(wrapperData, (bytes32, PrivateTradeTerms, PrivateTradeProposal.Proposal));
     _validateTerms(declaredOfferId, terms);
   }
 
@@ -95,11 +92,8 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
   {
     if (remainingWrapperData.length != 0) revert PrivateTrade_NotLastWrapper();
 
-    (
-      bytes32 declaredOfferId,
-      PrivateTradeTerms memory terms,
-      PrivateTradeProposal.Proposal memory proposal
-    ) = abi.decode(wrapperData, (bytes32, PrivateTradeTerms, PrivateTradeProposal.Proposal));
+    (bytes32 declaredOfferId, PrivateTradeTerms memory terms, PrivateTradeProposal.Proposal memory proposal) =
+      abi.decode(wrapperData, (bytes32, PrivateTradeTerms, PrivateTradeProposal.Proposal));
     bytes32 offerId_ = _validateTerms(declaredOfferId, terms);
     _validateProposal(proposal, terms, offerId_);
 
@@ -225,19 +219,15 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
   ) private view {
     if (block.timestamp > terms.offer.validTo) revert PrivateTrade_Expired();
 
-    if (tokens.length != 2 || clearingPrices.length != 2 || trades.length != 2) {
+    // Exactly the pair, and nothing else. The token array is not required to be exactly two
+    // entries: the driver emits one entry per order side, so the same token can appear several
+    // times. What matters is that both orders are present and that their prices are reciprocal,
+    // which is checked below through each trade's own token indices.
+    if (trades.length != 2 || clearingPrices.length != tokens.length || tokens.length < 2) {
       revert PrivateTrade_BadSettlementShape();
     }
     if (interactions[0].length != 0 || interactions[1].length != 0 || interactions[2].length != 0) {
       revert PrivateTrade_InteractionsNotAllowed();
-    }
-
-    // Canonical token order: index 0 is the maker's sell token.
-    if (address(tokens[0]) != terms.offer.sellToken || address(tokens[1]) != terms.offer.buyToken) {
-      revert PrivateTrade_OrderMismatch(0);
-    }
-    if (!PrivateTradeLib.isReciprocal(terms, clearingPrices[0], clearingPrices[1])) {
-      revert PrivateTrade_NotReciprocal();
     }
 
     // Both orders must point at the same appData document, which is where the bundle declaration
@@ -253,6 +243,9 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
     expected[1] = PrivateTradeLib.takerOrder(terms, trades[1].appData);
 
     for (uint256 i = 0; i < 2; ++i) {
+      if (trades[i].sellTokenIndex >= tokens.length || trades[i].buyTokenIndex >= tokens.length) {
+        revert PrivateTrade_BadSettlementShape();
+      }
       GPv2Order.Data memory order;
       GPv2Signing.Scheme signingScheme = _extractOrder(trades[i], tokens, order);
 
@@ -268,6 +261,13 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
       }
       address owner = address(bytes20(trades[i].signature));
       if (owner != expectedOwners[i]) revert PrivateTrade_UnexpectedOwner(i, expectedOwners[i], owner);
+    }
+
+    // The maker order pins both tokens, so its indices are a safe lookup into the price vector.
+    if (!PrivateTradeLib.isReciprocal(
+        terms, clearingPrices[trades[0].sellTokenIndex], clearingPrices[trades[0].buyTokenIndex]
+      )) {
+      revert PrivateTrade_NotReciprocal();
     }
   }
 }

@@ -123,6 +123,27 @@ Three things worth stating:
   a tradeless settlement. A private trade cannot be: both orders are fill-or-kill and the settlement
   marks them filled, so a replay already reverts with `GPv2: order filled`.
 
+## Executing through the driver (JIT + fulfillment)
+
+The maker's half never reaches the orderbook. The taker posts an order, and a sub-solver pairs the two
+by injecting the maker's order as a JIT trade:
+
+```
+trades: [jit(maker), fulfillment(taker)]   wrappers: [the private trade wrapper]   interactions: []
+```
+
+The driver then encodes `wrappedSettle` itself, with the wrapper as the transaction target. Verified
+on the offline stack — transaction
+`0x3e179a9d2ff11a56ad5d0456f683f46501b3cdaf942183558c72e6eb24af1d10` succeeded, `to` the wrapper,
+method `wrappedSettle(bytes,bytes)`, moving 100 DAI and 100 USDC between the two Sheds.
+
+```bash
+./scripts/private-trade-e2e.sh
+```
+
+`subsolver/private-trade-solver.mjs` is the sub-solver; [docs/JIT-PATH.md](docs/JIT-PATH.md) lists the
+five things the driver requires that cost time to discover.
+
 ## Paths covered
 
 | Path | Where | What it proves |
@@ -135,6 +156,7 @@ Three things worth stating:
 | BYOS proposal | `src/libraries/PrivateTradeProposal.sol`, driven by both e2e suites | A sub-solver with no allowlist entry signs; the allowlisted submitter executes; the wrapper verifies on-chain |
 | Submitter (fallback) | `src/PrivateTradeSubmitter.sol`, driven by both e2e suites | A deployed, allowlisted, keyless relay executed by a caller that is not a solver |
 | Payload builder | `test/PrivateTradeBuilder.t.sol` | The production builder agrees with the fixtures the suites are written against |
+| Driver, JIT + fulfillment | `scripts/private-trade-e2e.sh` | The driver encodes and submits `wrappedSettle`; the pair settles on the real stack |
 
 `./scripts/offline-e2e.sh` runs the last one; see [docs/OFFLINE.md](docs/OFFLINE.md).
 

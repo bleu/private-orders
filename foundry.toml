@@ -22,6 +22,9 @@ remappings = [
   'solady/=lib/cow-shed/lib/solady/src/',
 ]
 
+# Forge scripts write the payloads a sub-solver and the orderbook consume.
+fs_permissions = [{ access = "read-write", path = "./out-json" }]
+
 [fmt]
 line_length = 120
 tab_width = 2

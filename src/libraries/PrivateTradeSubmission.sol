@@ -83,8 +83,7 @@ library PrivateTradeSubmission {
     ) = PrivateTradeBuilder.conditionalOrderParams(context.handler, terms);
 
     bytes memory data = PrivateTradeBuilder.settleData(settlement, terms, makerParams, takerParams, appData);
-    bytes memory chain =
-      PrivateTradeBuilder.chainedWrapperData(terms, context.wrapper, context.proposal);
+    bytes memory chain = PrivateTradeBuilder.chainedWrapperData(terms, context.wrapper, context.proposal);
 
     magic = ICowWrapper(context.wrapper).wrappedSettle(data, chain);
   }

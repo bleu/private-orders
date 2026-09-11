@@ -36,12 +36,7 @@ library PrivateTradeAppData {
     return wrapperData(
       declaredOfferId,
       terms,
-      PrivateTradeProposal.Proposal({
-        wrapper: address(0),
-        termsHash: bytes32(0),
-        validUntil: 0,
-        signature: ""
-      })
+      PrivateTradeProposal.Proposal({wrapper: address(0), termsHash: bytes32(0), validUntil: 0, signature: ""})
     );
   }
 

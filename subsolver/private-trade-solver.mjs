@@ -1,0 +1,146 @@
+#!/usr/bin/env node
+// Private trade sub-solver.
+//
+// A BYOS sub-solver in the shape this repo argues for: it holds a private offer that never reaches
+// the orderbook, waits for the matching acceptance to appear in an auction, and answers with the
+// pair the wrapper expects.
+//
+//   fulfillment  the taker's order, which is a real orderbook order
+//   jit          the maker's order, injected inline and never published
+//   wrappers     the private trade bundle, which enforces the pair on-chain
+//   interactions none, because nothing else participates
+//
+// It reads the maker half from a JSON payload produced by `script/PreparePrivateTrade.s.sol`. No
+// private keys are involved: order authorisation comes from the Shed-owned conditional orders.
+//
+//   OFFER_FILE=/tmp/private-trade-offer.json PORT=9100 node private-trade-solver.mjs
+
+import http from 'node:http';
+import fs from 'node:fs';
+
+const PORT = Number(process.env.PORT ?? 9100);
+const OFFER_FILE = process.env.OFFER_FILE ?? '/tmp/private-trade-offer.json';
+const SOLVE_LOG = process.env.SOLVE_LOG ?? '/tmp/private-trade-solve.log';
+
+function log(entry) {
+  fs.appendFileSync(SOLVE_LOG, `${JSON.stringify(entry)}\n`);
+}
+
+function loadOffer() {
+  if (!fs.existsSync(OFFER_FILE)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(OFFER_FILE, 'utf8'));
+  } catch (err) {
+    log({ error: `unreadable offer file: ${err.message}` });
+    return null;
+  }
+}
+
+const hexEq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+
+/// Build the solution if this auction carries the acceptance for our offer.
+function buildSolution(auction, offer) {
+  const orders = auction.orders ?? [];
+
+  const takerOrder = orders.find(
+    (o) => hexEq(o.appData, offer.appDataHash) && hexEq(o.owner, offer.taker),
+  );
+
+  if (!takerOrder) {
+    log({
+      skip: 'acceptance not in this auction',
+      wanted: offer.appDataHash,
+      auctionKeys: Object.keys(auction),
+      orderCount: orders.length,
+      seen: orders.map((o) => ({ uid: o.uid, owner: o.owner, appData: o.appData })),
+    });
+    return [];
+  }
+
+  // The pair must be the exact mirror. The wrapper checks this on-chain too, but returning a
+  // solution that cannot settle only wastes a simulation.
+  if (!hexEq(takerOrder.sellToken, offer.buyToken) || !hexEq(takerOrder.buyToken, offer.sellToken)) {
+    log({ skip: 'acceptance is not the mirror of the offer' });
+    return [];
+  }
+
+  return [
+    {
+      id: 0,
+      prices: offer.prices,
+      // Order matters: the wrapper expects the maker first, and the driver preserves the order
+      // given here in the settlement's trades array.
+      trades: [
+        {
+          kind: 'jit',
+          order: offer.makerJitOrder,
+          executedAmount: offer.sellAmount,
+        },
+        {
+          kind: 'fulfillment',
+          order: takerOrder.uid,
+          executedAmount: takerOrder.sellAmount,
+          // A limit order requires a solver-computed fee. Omitting it means `Fee::Static`, which
+          // the driver rejects for limit orders; zero is the honest value here, since the taker
+          // pays nothing beyond the pair.
+          fee: '0',
+        },
+      ],
+      interactions: [],
+      wrappers: [{ address: offer.wrapper, data: offer.wrapperData }],
+    },
+  ];
+}
+
+const server = http.createServer((req, res) => {
+  if (req.method === 'GET') {
+    res.writeHead(200, { 'content-type': 'text/plain' }).end('ok');
+    return;
+  }
+
+  let body = '';
+  req.on('data', (chunk) => {
+    body += chunk;
+  });
+  req.on('end', () => {
+    let auction;
+    try {
+      auction = JSON.parse(body);
+    } catch {
+      res.writeHead(400).end('invalid json');
+      return;
+    }
+
+    log({ at: new Date().toISOString(), raw: body.slice(0, 400), bytes: body.length });
+    const offer = loadOffer();
+    const orders = auction.orders ?? [];
+    const solutions = offer ? buildSolution(auction, offer) : [];
+
+    log({
+      at: new Date().toISOString(),
+      auctionId: auction.id ?? null,
+      orders: orders.map((o) => ({
+        uid: o.uid,
+        owner: o.owner,
+        appData: o.appData,
+        sellToken: o.sellToken,
+        buyToken: o.buyToken,
+        sellAmount: o.sellAmount,
+        buyAmount: o.buyAmount,
+        fullSellAmount: o.fullSellAmount,
+        fullBuyAmount: o.fullBuyAmount,
+        kind: o.kind,
+        partiallyFillable: o.partiallyFillable,
+        wrappers: o.wrappers ?? [],
+      })),
+      solutions: solutions.length,
+    });
+
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ solutions }));
+  });
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  log({ at: new Date().toISOString(), listening: PORT, offerFile: OFFER_FILE });
+  console.log(`private trade sub-solver listening on ${PORT}, offer file ${OFFER_FILE}`);
+});

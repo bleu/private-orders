@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity >=0.8.0 <0.9.0;
 
-import {ECDSA} from '@openzeppelin/contracts/utils/cryptography/ECDSA.sol';
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /// @title PrivateTradeProposal
 /// @notice The EIP-712 commitment a BYOS sub-solver signs to submit a private trade.
@@ -39,63 +39,57 @@ import {ECDSA} from '@openzeppelin/contracts/utils/cryptography/ECDSA.sol';
 /// - **`minBuyAmount` / `quoteBuyAmount` are absent.** There is no routing and no slippage: the
 ///   amounts are exact, and the wrapper rejects anything that is not an exact reciprocal pair.
 library PrivateTradeProposal {
-    /// @dev `signature` is deliberately excluded from the struct hash so the signed data and the
-    /// signature can travel in one value.
-    bytes32 internal constant PROPOSAL_TYPEHASH =
-        keccak256('PrivateTradeProposal(address wrapper,bytes32 termsHash,uint256 validUntil)');
+  /// @dev `signature` is deliberately excluded from the struct hash so the signed data and the
+  /// signature can travel in one value.
+  bytes32 internal constant PROPOSAL_TYPEHASH =
+    keccak256("PrivateTradeProposal(address wrapper,bytes32 termsHash,uint256 validUntil)");
 
-    bytes32 internal constant DOMAIN_TYPEHASH =
-        keccak256('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)');
+  bytes32 internal constant DOMAIN_TYPEHASH =
+    keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
-    bytes32 internal constant DOMAIN_NAME = keccak256('BYOS');
+  bytes32 internal constant DOMAIN_NAME = keccak256("BYOS");
 
-    /// @dev Bumped relative to BYOS's routing proposals ("0.1"): different struct, different domain.
-    bytes32 internal constant DOMAIN_VERSION = keccak256('0.2');
+  /// @dev Bumped relative to BYOS's routing proposals ("0.1"): different struct, different domain.
+  bytes32 internal constant DOMAIN_VERSION = keccak256("0.2");
 
-    /// @param wrapper The private trade wrapper expected to execute this pair.
-    /// @param termsHash `keccak256(abi.encode(offerId, taker, wrapper))` — the exact pair the
-    /// sub-solver approved. The wrapper recomputes it from its own state.
-    /// @param validUntil Expiry. The wrapper rejects a stale proposal.
-    /// @param signature 65-byte `r || s || v`, or empty to skip on-chain verification.
-    struct Proposal {
-        address wrapper;
-        bytes32 termsHash;
-        uint256 validUntil;
-        bytes signature;
-    }
+  /// @param wrapper The private trade wrapper expected to execute this pair.
+  /// @param termsHash `keccak256(abi.encode(offerId, taker, wrapper))` — the exact pair the
+  /// sub-solver approved. The wrapper recomputes it from its own state.
+  /// @param validUntil Expiry. The wrapper rejects a stale proposal.
+  /// @param signature 65-byte `r || s || v`, or empty to skip on-chain verification.
+  struct Proposal {
+    address wrapper;
+    bytes32 termsHash;
+    uint256 validUntil;
+    bytes signature;
+  }
 
-    /// @notice The commitment the sub-solver signs, recomputable by the wrapper from its own state.
-    function termsHash(bytes32 offerId, address taker, address wrapper) internal pure returns (bytes32) {
-        return keccak256(abi.encode(offerId, taker, wrapper));
-    }
+  /// @notice The commitment the sub-solver signs, recomputable by the wrapper from its own state.
+  function termsHash(bytes32 offerId, address taker, address wrapper) internal pure returns (bytes32) {
+    return keccak256(abi.encode(offerId, taker, wrapper));
+  }
 
-    function domainSeparator(address verifyingContract) internal view returns (bytes32) {
-        return keccak256(
-            abi.encode(DOMAIN_TYPEHASH, DOMAIN_NAME, DOMAIN_VERSION, block.chainid, verifyingContract)
-        );
-    }
+  function domainSeparator(address verifyingContract) internal view returns (bytes32) {
+    return keccak256(abi.encode(DOMAIN_TYPEHASH, DOMAIN_NAME, DOMAIN_VERSION, block.chainid, verifyingContract));
+  }
 
-    function hashStruct(Proposal memory proposal) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encode(PROPOSAL_TYPEHASH, proposal.wrapper, proposal.termsHash, proposal.validUntil)
-        );
-    }
+  function hashStruct(Proposal memory proposal) internal pure returns (bytes32) {
+    return keccak256(abi.encode(PROPOSAL_TYPEHASH, proposal.wrapper, proposal.termsHash, proposal.validUntil));
+  }
 
-    function digest(Proposal memory proposal, address verifyingContract) internal view returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(hex'1901', domainSeparator(verifyingContract), hashStruct(proposal))
-        );
-    }
+  function digest(Proposal memory proposal, address verifyingContract) internal view returns (bytes32) {
+    return keccak256(abi.encodePacked(hex"1901", domainSeparator(verifyingContract), hashStruct(proposal)));
+  }
 
-    /// @notice Recover the sub-solver. Returns `address(0)` for a malformed signature.
-    function recover(Proposal memory proposal, address verifyingContract) internal view returns (address) {
-        if (proposal.signature.length != 65) return address(0);
-        return ECDSA.recover(digest(proposal, verifyingContract), proposal.signature);
-    }
+  /// @notice Recover the sub-solver. Returns `address(0)` for a malformed signature.
+  function recover(Proposal memory proposal, address verifyingContract) internal view returns (address) {
+    if (proposal.signature.length != 65) return address(0);
+    return ECDSA.recover(digest(proposal, verifyingContract), proposal.signature);
+  }
 
-    /// @notice `true` when the proposal carries no signature, meaning on-chain verification is
-    /// skipped and only the trade itself is checked.
-    function isUnsigned(Proposal memory proposal) internal pure returns (bool) {
-        return proposal.signature.length == 0;
-    }
+  /// @notice `true` when the proposal carries no signature, meaning on-chain verification is
+  /// skipped and only the trade itself is checked.
+  function isUnsigned(Proposal memory proposal) internal pure returns (bool) {
+    return proposal.signature.length == 0;
+  }
 }

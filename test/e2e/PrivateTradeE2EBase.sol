@@ -266,17 +266,14 @@ abstract contract PrivateTradeE2EBase is Test {
       validUntil: block.timestamp + 30 minutes,
       signature: ""
     });
-    (uint8 v, bytes32 r, bytes32 s) =
-      vm.sign(subSolverPk, PrivateTradeProposal.digest(proposal, address(wrapper)));
+    (uint8 v, bytes32 r, bytes32 s) = vm.sign(subSolverPk, PrivateTradeProposal.digest(proposal, address(wrapper)));
     proposal.signature = abi.encodePacked(r, s, v);
 
     context.proposal = proposal;
 
     if (tamper) {
       vm.expectRevert(
-        abi.encodeWithSelector(
-          PrivateTrade_ProposalPayloadMismatch.selector, pairHash, proposal.termsHash
-        )
+        abi.encodeWithSelector(PrivateTrade_ProposalPayloadMismatch.selector, pairHash, proposal.termsHash)
       );
       submitter.submitPrepared(context, signed.terms);
       return;
