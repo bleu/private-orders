@@ -13,7 +13,7 @@ forge test
 ```
 
 ```
-Ran 1 test suite: 21 tests passed, 0 failed, 0 skipped
+35 tests passed, 0 failed, 1 skipped   (the offline test runs only with OFFLINE_RPC set)
 ```
 
 ## The guarantee
@@ -72,14 +72,28 @@ Two consequences of the framework that this design takes seriously:
    re-check the published terms against the offer each party actually authorised in
    `ComposableCoW`.
 
+## Paths covered
+
+| Path | Where | What it proves |
+| --- | --- | --- |
+| Contract wallets | `test/PrivateTradeSettlement.t.sol` | The protocol invariant, against a real settlement |
+| appData-declared bundles | `test/PrivateTradeAppData.t.sol` | An order declares its bundle in appData; the official `CowWrapperHelpers` encodes the chain |
+| Driver wire format | `test/PrivateTradeDriverFormat.t.sol` | The bytes the driver actually produces, including the appended auction id |
+| EOA -> CoW Shed | `test/PrivateTradeShed.t.sol` | Real `COWShedFactory` + `COWShedForComposableCoW`, owner-signed bundles, relayed by anyone |
+| Offline chain | `test/offline/PrivateTradeOffline.t.sol` | The real settlement, shed factory, ComposableCoW and tokens on `bleu/cow-offline-mode` |
+
+`./scripts/offline-e2e.sh` runs the last one; see [docs/OFFLINE.md](docs/OFFLINE.md).
+
 ## What is real in these tests
 
 | Real | Stubbed |
 | --- | --- |
-| `GPv2Settlement`, `GPv2VaultRelayer`, `GPv2AllowListAuthentication` (unmodified, `cowprotocol/contracts@main`) | The vault is an address: with `BALANCE_ERC20` on both sides the settlement never calls it |
-| `CowWrapper` from the upstream all-in-one file, the real `wrappedSettle` entry point and chained encoding | `TestPrivateWallet` stands in for a CoW Shed |
-| `ComposableCoW` + the ERC-1271 forwarding path | No UI, no driver, no BYOS sub-solver yet |
-| Token balances really move; the settlement keeps nothing | Bundle allowlisting is a local allowlist call, not DAO governance |
+| `GPv2Settlement`, `GPv2VaultRelayer`, `GPv2AllowListAuthentication` (unmodified, `cowprotocol/contracts@main`) | In unit tests the vault is an address: with `BALANCE_ERC20` on both sides the settlement never calls it |
+| `CowWrapper` and `CowWrapperHelpers`, vendored verbatim from upstream | Bundle allowlisting is a local `addSolver` call, not DAO governance |
+| `ComposableCoW` + the ERC-1271 forwarding path | |
+| `COWShedFactory`, `COWShedProxy`, `COWShedForComposableCoW` v2.1.0 | |
+| Token balances really move; the settlement keeps nothing | |
+| The offline path uses the real chain, real addresses and real tokens | No DAO allowlisting, no audit |
 
 ## Test matrix
 
@@ -104,6 +118,16 @@ Two consequences of the framework that this design takes seriously:
 | `test_verifyRejectsNonSettlementCaller` | The handler only trusts the settlement |
 | `test_tradeFlagsDecodeAsExactSellOrder` | Local flags decoding agrees with the settlement |
 | `test_nameIsSet` | Bundle metadata |
+| `test_settlesThroughAppDataDeclaredBundle` | Order declares its bundle in appData; driver-style parse, then settle |
+| `test_tamperedBundleDataInDocumentReverts` | Swapping the bundle data is caught by the offer commitment |
+| `test_mismatchedAppDataReverts` | Both orders must commit to the same appData document |
+| `test_helpersRejectMalformedBundleData` | Pre-flight validation via upstream `CowWrapperHelpers` |
+| `test_helpersRejectUnauthenticatedBundle` | Only allowlisted bundles can be declared |
+| `test_settlesWithAppendedAuctionId` | The driver appends the auction id; the wrapper tolerates it |
+| `test_settlesWithShedOwnedOrders` | Two EOAs, two Sheds, one settlement |
+| `test_orderMustBeAuthorisedByTheShed` | The Shed must authorise the order; approval alone is not enough |
+| `test_bundleSignatureIsBoundToTheShed` | A bundle cannot be replayed onto another owner's Shed |
+| `test_bundleNonceCannotBeReplayed` | Nonce replay is rejected |
 
 The suite is mutation-checked: removing the `activeOfferId` check, the last-bundle check, or the
 `allowedTaker` check makes specific tests fail.
@@ -115,23 +139,28 @@ src/PrivateTradeWrapper.sol         the Atomic Bundle: validates the pair, publi
 src/PrivateTradeOrder.sol           ComposableCoW handler: validity depends on the wrapper
 src/libraries/PrivateTradeLib.sol   derives the two orders, checks exact reciprocity
 src/interfaces/IPrivateTrade.sol    offer/terms types, errors, interfaces
+src/libraries/PrivateTradeAppData.sol  builds the appData document that declares the bundle
 src/vendor/CowWrapper.sol           upstream CoW Atomic Bundle base, vendored verbatim
+src/vendor/CowWrapperHelpers.sol    upstream chain validation/encoding helper, vendored verbatim
 test/PrivateTradeSettlement.t.sol   end-to-end behaviour against a real settlement
 test/utils/                         harness: contract wallet, ERC20, flags encoder, base fixture
 ```
 
 ## Not built yet
 
-1. **The appData frontend path.** `wrappers[]` is built here in tests. A real integration encodes it
-   into the order's appData and validates it with `CowWrapperHelpers.verifyAndBuildWrapperData`.
-2. **CoW Shed wiring.** Today both wallets are pre-funded and orders are authorised directly. The
-   real flow puts funding, `approve`, and `ComposableCoW.create` into owner-signed Shed hook bundles
-   the wrapper executes in the same transaction, so nothing is stranded if the counterparty never
-   shows up.
-3. **BYOS sub-solver.** A sub-solver that pairs a private offer with an acceptance and submits
-   `fulfillment(taker) + JIT(maker)` through the bonded solver.
+1. **A sub-solver.** A private trade needs a solver that submits the two orders as fulfillments with
+   no interactions. The built-in baseline solver routes through AMM liquidity and adds interactions,
+   which this wrapper rejects by design. A minimal solver is the next artifact.
+2. **Order submission.** Nothing here posts an order to the orderbook. The appData document is built
+   and validated, but the `PUT /api/v1/app_data/{hash}` + `POST /api/v1/orders` sequence lives in the
+   offline repo's scripts, not here.
+3. **Atomic funding inside the settlement.** Approvals and order authorisation are atomic with the
+   trade only if the signed bundles are carried in the bundle chain. Funding is currently a separate
+   transfer into the Shed. The Shed is owner-controlled, so nothing is stranded, but it is two
+   transactions instead of one.
 4. **Allowlisting and audit.** Production bundles must pass a security audit and be approved by CoW
    DAO. Neither the audit nor the governance step is in scope here.
+5. **Non-ERC20 assets.** NFTs, game items, partial fills.
 
 Pinned to `cowprotocol/contracts@main`, `cowprotocol/composable-cow@main`, `cowdao-grants/cow-shed@main`,
 and the upstream `CowWrapper.sol`.
