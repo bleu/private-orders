@@ -87,6 +87,42 @@ this does not.
 Interactions are rejected outright, in all three phases. A settlement that contains a Uniswap call
 is not a bilateral trade, whatever the orders say.
 
+## Integrating with the orderbook and driver
+
+Three findings from reading `cowprotocol/services` at the revision `bleu/cow-offline-mode` pins
+(`3480ee76`, 2025-12-18).
+
+**Orders must skip creation-time signature validation.** This is not a bug in the design, it is the
+design: an order is valid *only* inside the settlement that pairs it, so it cannot produce a magic
+value when the orderbook calls `isValidSignature` during `POST /orders`. CoW already has the flag for
+this exact class of order — `--eip1271-skip-creation-validation`
+(`crates/orderbook/src/arguments.rs:111-114`), settable as
+`EIP1271_SKIP_CREATION_VALIDATION=true`. Nothing about on-chain enforcement changes: the settlement
+still refuses any order that is not part of the exact pair. Anyone who wants the strongest possible
+counterparty guarantee needs this flag set, and that is a real integration cost worth stating in the
+RFC.
+
+**The bundle travels in appData, and the solver must echo it back.** The driver reads
+`metadata.wrappers` from the order's appData and forwards it per order in the auction
+(`crates/solvers-dto/src/auction.rs`), the solver returns a flat `wrappers` list in its solution, and
+the driver sets `to = wrappers[0].address` and encodes `wrappedSettle(settleData, chainedWrapperData)`.
+The wire format uses `address`, not `target`. Full app data must be registered
+(`PUT /api/v1/app_data/{hash}`) or posted inline; with only the hash available the driver sees no
+wrappers and settles silently without them.
+
+**The stock solver cannot serve a private trade.** The baseline solver routes through AMM liquidity
+and appends interactions. This wrapper rejects interactions outright, so a private trade needs a
+solver that submits exactly two fulfillments and nothing else. That solver is mechanical — it reads
+the pair out of the auction and echoes the wrappers — but it does not exist yet.
+
+Two open risks in the driver, neither load-bearing for this design:
+
+- The driver does not cross-check the solver's `wrappers` against the orders' appData, so a solver
+  could attach a different bundle. Irrelevant here: the wrapper validates the pair, and the orders
+  validate the wrapper's published terms.
+- `Solution::merge` keeps only the left-hand solution's wrappers, so a bundled solution that gets
+  merged can lose its bundle. Worth avoiding merges for private trades.
+
 ## Why not the alternatives
 
 | Option | Why not |
