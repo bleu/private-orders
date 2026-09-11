@@ -13,10 +13,7 @@ import {PrivateOffer, PrivateTradeTerms, PrivateTradeRole} from "../src/interfac
 import {PrivateTradeAppData} from "../src/libraries/PrivateTradeAppData.sol";
 import {PrivateTradeBuilder} from "../src/libraries/PrivateTradeBuilder.sol";
 import {PrivateTradeLib} from "../src/libraries/PrivateTradeLib.sol";
-
-interface IShedImplementation {
-  function VERSION() external view returns (string memory);
-}
+import {ShedBundle} from "../src/libraries/ShedBundle.sol";
 
 /// @notice Derives everything a private trade link needs, from a request file, with no private key
 /// and no transaction. The link service calls this instead of re-deriving the payload in its own
@@ -29,14 +26,6 @@ interface IShedImplementation {
 /// bundle executes, and the EIP-712 digest to sign. Signing the digest is the only secret a party
 /// needs; everything else is public.
 contract LinkCompute is Script {
-  bytes32 internal constant EIP712_DOMAIN_TYPE_HASH =
-    keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-  bytes32 internal constant EXECUTE_HOOKS_TYPE_HASH = keccak256(
-    "ExecuteHooks(Call[] calls,bytes32 nonce,uint256 deadline)Call(address target,uint256 value,bytes callData,bool allowFailure,bool isDelegateCall)"
-  );
-  bytes32 internal constant CALL_TYPE_HASH =
-    keccak256("Call(address target,uint256 value,bytes callData,bool allowFailure,bool isDelegateCall)");
-
   struct Request {
     address maker;
     address allowedTaker;
@@ -50,6 +39,7 @@ contract LinkCompute is Script {
     address shedFactory;
     address composableCoW;
     address vaultRelayer;
+    bool fund;
   }
 
   function run() external {
@@ -66,7 +56,8 @@ contract LinkCompute is Script {
 
     string memory json = '{"wrapper":"';
     json = string.concat(json, vm.toString(request.wrapper));
-    json = string.concat(json, '","offerId":"');
+    json = string.concat(json, '","fund":', request.fund ? "true" : "false");
+    json = string.concat(json, ',"offerId":"');
     json = string.concat(json, vm.toString(PrivateTradeLib.offerId(terms.offer)));
     json = string.concat(json, '","appDataHash":"', vm.toString(appData));
     json = string.concat(json, '","appDataDocument":');
@@ -115,39 +106,67 @@ contract LinkCompute is Script {
   ) private view returns (string memory json) {
     address sellToken = isMaker ? request.sellToken : request.buyToken;
     uint256 sellAmount = isMaker ? request.sellAmount : request.buyAmount;
-    string memory label = isMaker ? "maker" : "taker";
-    bytes32 nonce = keccak256(abi.encode(label, terms.offer.salt));
+    address owner = isMaker ? request.maker : request.allowedTaker;
+    bytes32 nonce = keccak256(abi.encode(isMaker ? "maker" : "taker", terms.offer.salt));
     uint256 deadline = block.timestamp + request.validFor;
+    Call[] memory calls = _calls(request, params, shed, owner, sellToken, sellAmount);
 
-    Call[] memory calls = new Call[](2);
-    calls[0] = Call({
+    json = '{"owner":"';
+    json = string.concat(json, vm.toString(owner));
+    json = string.concat(json, '","shed":"', vm.toString(shed));
+    json = string.concat(json, '","nonce":"', vm.toString(nonce));
+    json = string.concat(json, '","deadline":', vm.toString(deadline));
+    json = string.concat(json, ',"sellToken":"', vm.toString(sellToken));
+    json = string.concat(json, '","sellAmount":"', vm.toString(sellAmount));
+    json = string.concat(json, '","funded":', request.fund ? "true" : "false");
+    json = string.concat(json, ',"approveCall":"', vm.toString(calls[request.fund ? 1 : 0].callData));
+    if (request.fund) {
+      json = string.concat(json, '","fundCall":"', vm.toString(calls[0].callData));
+    }
+    json = string.concat(json, '","createCall":"', vm.toString(calls[request.fund ? 2 : 1].callData));
+    json = string.concat(json, '","digest":"');
+    json = string.concat(json, vm.toString(_digest(request, shed, calls, nonce, deadline)));
+    json = string.concat(json, '"}');
+  }
+
+  /// @dev The calls one party's bundle executes: fund the Shed, let the vault relayer take the sell
+  /// tokens at settlement, and authorise the order.
+  function _calls(
+    Request memory request,
+    IConditionalOrder.ConditionalOrderParams memory params,
+    address shed,
+    address owner,
+    address sellToken,
+    uint256 sellAmount
+  ) private view returns (Call[] memory calls) {
+    calls = new Call[](request.fund ? 3 : 2);
+    uint256 i = 0;
+    if (request.fund) {
+      // Funding rides inside the same signed bundle: a separate transfer would cost a second
+      // transaction and leave a window where the order is authorised but unfunded. The Shed is the
+      // spender, so the party approves the Shed on the token once, beforehand.
+      calls[i++] = Call({
+        target: sellToken,
+        value: 0,
+        callData: abi.encodeCall(IERC20.transferFrom, (owner, shed, sellAmount)),
+        allowFailure: false,
+        isDelegateCall: false
+      });
+    }
+    calls[i++] = Call({
       target: sellToken,
       value: 0,
       callData: abi.encodeCall(IERC20.approve, (request.vaultRelayer, sellAmount)),
       allowFailure: false,
       isDelegateCall: false
     });
-    calls[1] = Call({
+    calls[i] = Call({
       target: request.composableCoW,
       value: 0,
       callData: abi.encodeCall(ComposableCoW.create, (params, false)),
       allowFailure: false,
       isDelegateCall: false
     });
-
-    json = '{"owner":"';
-    json = string.concat(json, vm.toString(isMaker ? request.maker : request.allowedTaker));
-    json = string.concat(json, '","shed":"', vm.toString(shed));
-    json = string.concat(json, '","nonce":"', vm.toString(nonce));
-    json = string.concat(json, '","deadline":', vm.toString(deadline));
-    json = string.concat(json, ',"sellToken":"', vm.toString(sellToken));
-    json = string.concat(json, '","sellAmount":"', vm.toString(sellAmount));
-    json = string.concat(json, '","approveCall":"');
-    json = string.concat(json, vm.toString(calls[0].callData));
-    json = string.concat(json, '","createCall":"', vm.toString(calls[1].callData));
-    json = string.concat(json, '","digest":"');
-    json = string.concat(json, vm.toString(_digest(request, shed, calls, nonce, deadline)));
-    json = string.concat(json, '"}');
   }
 
   function _digest(Request memory request, address shed, Call[] memory calls, bytes32 nonce, uint256 deadline)
@@ -155,27 +174,7 @@ contract LinkCompute is Script {
     view
     returns (bytes32)
   {
-    bytes32 version =
-      keccak256(bytes(IShedImplementation(COWShedFactory(request.shedFactory).implementation()).VERSION()));
-    bytes32 domainSeparator =
-      keccak256(abi.encode(EIP712_DOMAIN_TYPE_HASH, keccak256("COWShed"), version, block.chainid, shed));
-
-    bytes32[] memory hashes = new bytes32[](calls.length);
-    for (uint256 i = 0; i < calls.length; ++i) {
-      hashes[i] = keccak256(
-        abi.encode(
-          CALL_TYPE_HASH,
-          calls[i].target,
-          calls[i].value,
-          keccak256(calls[i].callData),
-          calls[i].allowFailure,
-          calls[i].isDelegateCall
-        )
-      );
-    }
-    bytes32 structHash =
-      keccak256(abi.encode(EXECUTE_HOOKS_TYPE_HASH, keccak256(abi.encodePacked(hashes)), nonce, deadline));
-    return keccak256(abi.encodePacked(hex"1901", domainSeparator, structHash));
+    return ShedBundle.digest(request.shedFactory, shed, calls, nonce, deadline);
   }
 
   function _jitOrder(
@@ -276,5 +275,8 @@ contract LinkCompute is Script {
     request.shedFactory = vm.parseJsonAddress(json, ".shedFactory");
     request.composableCoW = vm.parseJsonAddress(json, ".composableCoW");
     request.vaultRelayer = vm.parseJsonAddress(json, ".vaultRelayer");
+    // Fund the Shed inside the signed bundle by default; `.fund = false` asks for authorisation
+    // only, for a party who would rather move the tokens themselves.
+    request.fund = !vm.keyExistsJson(json, ".fund") || vm.parseJsonBool(json, ".fund");
   }
 }

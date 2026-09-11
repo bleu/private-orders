@@ -64,15 +64,28 @@ contract LinkRelay is Script {
   }
 
   function _bundle(string memory computed, string memory key) private view returns (ShedBundle.Bundle memory) {
-    Call[] memory calls = new Call[](2);
-    calls[0] = Call({
-      target: vm.parseJsonAddress(computed, string.concat(key, ".sellToken")),
+    address sellToken = vm.parseJsonAddress(computed, string.concat(key, ".sellToken"));
+    bool funds = vm.parseJsonBool(computed, string.concat(key, ".funded"));
+
+    Call[] memory calls = new Call[](funds ? 3 : 2);
+    uint256 i = 0;
+    if (funds) {
+      calls[i++] = Call({
+        target: sellToken,
+        value: 0,
+        callData: vm.parseJsonBytes(computed, string.concat(key, ".fundCall")),
+        allowFailure: false,
+        isDelegateCall: false
+      });
+    }
+    calls[i++] = Call({
+      target: sellToken,
       value: 0,
       callData: vm.parseJsonBytes(computed, string.concat(key, ".approveCall")),
       allowFailure: false,
       isDelegateCall: false
     });
-    calls[1] = Call({
+    calls[i] = Call({
       target: vm.envAddress("COMPOSABLE_COW_ADDRESS"),
       value: 0,
       callData: vm.parseJsonBytes(computed, string.concat(key, ".createCall")),

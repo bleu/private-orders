@@ -134,6 +134,26 @@ async function status(offer) {
   return { status: order.status === 'fulfilled' ? 'settled' : 'settling', orderUid: offer.orderUid };
 }
 
+/// What a party must do before signing. The bundle funds the Shed itself, so the only prior step is
+/// one ERC-20 approval to the Shed. A separate transfer would cost a second transaction and leave a
+/// window where the order is authorised but unfunded.
+const funding = (computed, role) =>
+  computed.fund === false
+    ? {
+        note: 'send the sell tokens to your Shed, then sign',
+        token: computed[role === 'maker' ? 'sellToken' : 'buyToken'],
+        to: role === 'maker' ? computed.makerShed : computed.takerBundle.shed,
+        amount: computed[role === 'maker' ? 'sellAmount' : 'buyAmount'],
+      }
+    : {
+        note: 'approve your Shed once, then a single signature funds it and authorises the order',
+        token: computed[role === 'maker' ? 'sellToken' : 'buyToken'],
+        owner: role === 'maker' ? computed.maker : computed.takerBundle.owner,
+        spender: role === 'maker' ? computed.makerShed : computed.takerBundle.shed,
+        amount: computed[role === 'maker' ? 'sellAmount' : 'buyAmount'],
+        doneBy: 'your signature; this is the only transaction you need before signing',
+      };
+
 const page = (offer, computed) => `<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Private trade</title>
@@ -153,8 +173,10 @@ const page = (offer, computed) => `<!doctype html>
  <tr><td>Counterparty</td><td><code>${computed.makerShed}</code></td></tr>
  <tr><td>Expires</td><td>${new Date(Number(computed.validTo) * 1000).toISOString()}</td></tr>
 </table>
-<p class="muted">Sign this digest with the wallet that owns your Shed, then
- <code>POST /offers/${offer.id}/accept</code> with <code>{"signature":"0x…"}</code>.</p>
+<p class="muted">First approve your Shed to take <b>${computed.buyAmount}</b> <code>${computed.buyToken}</code>
+ (<code>approve(${computed.takerBundle.shed}, ${computed.buyAmount})</code>). Then sign this digest with the
+ wallet that owns your Shed, and <code>POST /offers/${offer.id}/accept</code> with
+ <code>{"signature":"0x…"}</code> — the signature funds your Shed and authorises the order in one go.</p>
 <p><code>${computed.takerBundle.digest}</code></p>`;
 
 const server = http.createServer(async (req, res) => {
@@ -190,12 +212,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 201, {
         id,
         link: `${PUBLIC_URL}/o/${id}`,
-        funding: {
-          note: 'the Shed owns the order, so it must hold the sell tokens before settlement',
-          token: computed.sellToken,
-          to: computed.makerShed,
-          amount: computed.sellAmount,
-        },
+        funding: funding(computed, 'maker'),
         makerBundle: {
           shed: computed.makerBundle.shed,
           nonce: computed.makerBundle.nonce,
@@ -227,6 +244,7 @@ const server = http.createServer(async (req, res) => {
             deadline: offer.computed.takerBundle.deadline,
             digest: offer.computed.takerBundle.digest,
           },
+          funding: funding(offer.computed, 'taker'),
           orderUid: offer.orderUid ?? null,
         });
       }
@@ -261,9 +279,11 @@ const server = http.createServer(async (req, res) => {
         const signature = body.signature ?? offer.signatures.taker;
         if (!signature) return json(res, 400, { error: 'signature required' });
         offer.signatures.taker = signature;
-        offer.makerBalanceAtAccept = balanceOf(offer.computed.sellToken, offer.computed.makerShed);
 
+        // Relaying funds both Sheds, so the baseline for "has it settled" must be read after it,
+        // not before: otherwise the funding transfer itself looks like a sale.
         relay(offer.computed, offer.signatures.maker, offer.signatures.taker);
+        offer.makerBalanceAtAccept = balanceOf(offer.computed.sellToken, offer.computed.makerShed);
 
         // The sub-solver now needs the private half: the maker's terms and its JIT order. Until
         // this file exists the order sits in the auction and nothing can pair it.

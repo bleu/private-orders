@@ -135,6 +135,9 @@ Maker creates an offer and gets a link; the taker opens it, signs, accepts; the 
 hook bundles, hands the private half to the sub-solver, and posts the taker's order. Verified on the
 offline stack, ending in a settled offer.
 
+Funding is inside the signed bundle: each party approves their Shed once, then one signature funds the
+Shed, authorises the order, and lets settlement take the sell tokens.
+
 The service holds **no key that can move value** — it relays owner-signed bundles and posts an
 ERC-1271 payload — and it **never re-derives the trade**: `script/LinkCompute.s.sol` *is*
 `PrivateTradeBuilder`, so the service cannot drift from the on-chain rules. See

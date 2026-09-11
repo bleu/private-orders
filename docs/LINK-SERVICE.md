@@ -23,10 +23,31 @@ That script is the whole story: it deploys the contracts, allowlists the wrapper
 sub-solver and the service, then acts as both parties. Against the offline stack it ends with:
 
 ```
-==> settled — offer status: settled
-   taker shed DAI   500 -> 400
-   maker shed USDC  700 -> 600
+==> settled
+   maker shed USDC 600000000 -> 600000000   (sold)
+   maker shed DAI  400000000000000000000 -> 500000000000000000000   (received)
+   taker shed DAI  400000000000000000000 -> 400000000000000000000   (sold)
+   taker shed USDC 400000000 -> 500000000   (received)
 ```
+
+The sell side nets to zero on purpose: the party funded their Shed and the Shed spent it, both inside
+the one signed bundle. The received side is the trade.
+
+## Funding is part of the signature
+
+The Shed owns the order, so it must hold the sell tokens before the pair can settle. Rather than
+leaving that as a separate transfer, the funding call rides **inside the same signed bundle**:
+
+```
+transferFrom(you, yourShed, sellAmount)   // fund it
+approve(vaultRelayer, sellAmount)         // let settlement take it
+create(orderParams)                       // authorise the order
+```
+
+So a party does exactly two things: approve their Shed on the sell token **once**, then sign. One
+signature funds the Shed and authorises the order, and there is no window where the order is live but
+unfunded. Send `{"fund": false}` to `POST /offers` for authorisation only, if the party would rather
+move the tokens themselves.
 
 ## What the service does and does not hold
 
@@ -70,9 +91,9 @@ opaque revert.
 
 ## Known gaps
 
-- **Funding is a separate step.** The Shed must hold the sell tokens before the trade can settle; the
-  service reports the amount and address but does not move funds. Making this atomic is the obvious
-  next improvement — a signed call inside the bundle can do it if the party has approved the Shed.
+- **The approval to the Shed is still a separate transaction**, because it must be signed by the
+  party's own key. It is a one-time, standard ERC-20 approval per token, but it is not free and it is
+  not batched with the signature. An EIP-2612 permit where the token supports it would remove it.
 - **Storage is local files.** Offers live under `out-json/link/`. A deployment needs a database and
   a reaper for expired offers.
 - **No offer expiry sweep.** An offer that is never accepted keeps its authorisation on-chain until
