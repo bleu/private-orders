@@ -106,11 +106,21 @@ The path is:
 Step 4 is the whole integration. The orders never become public, so there is nothing to discover,
 quote, rank or compete over.
 
-Step 4 is now built: `PrivateTradeSubmitter` is a deployed, stateless contract, and
-`PrivateTradeBuilder` is the pure library it uses. Because the submitter contract is the
-allowlisted identity, the *caller* needs no permission at all — the deployed address authenticates
-the calls it makes, so anyone can relay a signed pair. Neither party, nor the service, holds a
-submitter key.
+Step 4 is built twice, deliberately:
+
+- **Through BYOS**, the intended path. The submitter is BYOS: already bonded, already allowlisted,
+  with escrow collateral absorbing reverts and its own fee mechanism. A private-trade sub-solver is
+  an ordinary key — BYOS's integration guide is explicit that a sub-solver needs no solver seat and
+  no allowlist entry, and the tests assert exactly that. The sub-solver signs
+  `PrivateTradeProposal(wrapper, termsHash, validUntil)`, and the wrapper verifies that signature
+  on-chain, so BYOS cannot substitute a payload and blame the sub-solver.
+- **Through `PrivateTradeSubmitter`**, a deployed stateless contract, as a permissionless fallback
+  for deployments that do not want BYOS in the path. Because the contract is the allowlisted
+  identity, the caller needs no permission at all. It costs one extra allowlist entry and has no
+  accountability layer, which is why it is the fallback and not the default.
+
+`PrivateTradeBuilder` is the pure library both use. It needs no private key: order authorisation
+comes from the Shed-owned conditional orders.
 
 **One allowlisted submitter is required.** `CowWrapper.wrappedSettle` is `external` on the base
 contract and not `virtual`, so it enforces `AUTHENTICATOR.isSolver(msg.sender)`, and the wrapper
