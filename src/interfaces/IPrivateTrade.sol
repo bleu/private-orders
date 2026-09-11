@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity >=0.8.0 <0.9.0;
 
-import {GPv2Order} from 'cowprotocol/contracts/libraries/GPv2Order.sol';
-import {GPv2Trade} from 'cowprotocol/contracts/libraries/GPv2Trade.sol';
-import {GPv2Interaction} from 'cowprotocol/contracts/libraries/GPv2Interaction.sol';
-import {IERC20} from 'cowprotocol/contracts/interfaces/IERC20.sol';
+import {GPv2Order} from "cowprotocol/contracts/libraries/GPv2Order.sol";
+import {GPv2Trade} from "cowprotocol/contracts/libraries/GPv2Trade.sol";
+import {GPv2Interaction} from "cowprotocol/contracts/libraries/GPv2Interaction.sol";
+import {IERC20} from "cowprotocol/contracts/interfaces/IERC20.sol";
 
 /// @title Private Trades - shared types
 /// @notice A Private Trade is a pair of reciprocal, fill-or-kill CoW orders that are
@@ -12,8 +12,8 @@ import {IERC20} from 'cowprotocol/contracts/interfaces/IERC20.sol';
 
 /// @dev Which half of the pair a conditional order represents.
 enum PrivateTradeRole {
-    Maker,
-    Taker
+  Maker,
+  Taker
 }
 
 /// @dev The terms one party commits to when creating a private offer.
@@ -26,14 +26,14 @@ enum PrivateTradeRole {
 /// @param validTo Unix timestamp after which the offer is dead.
 /// @param salt Unique per offer, so identical terms can be re-issued.
 struct PrivateOffer {
-    address maker;
-    address allowedTaker;
-    address sellToken;
-    uint256 sellAmount;
-    address buyToken;
-    uint256 buyAmount;
-    uint32 validTo;
-    bytes32 salt;
+  address maker;
+  address allowedTaker;
+  address sellToken;
+  uint256 sellAmount;
+  address buyToken;
+  uint256 buyAmount;
+  uint32 validTo;
+  bytes32 salt;
 }
 
 /// @dev The concrete pair being settled: an offer plus the taker that accepted it.
@@ -41,9 +41,9 @@ struct PrivateOffer {
 /// @param taker The counterparty accepting this offer, as an order-owning contract.
 /// @param appData CoW appData hash both orders must commit to.
 struct PrivateTradeTerms {
-    PrivateOffer offer;
-    address taker;
-    bytes32 appData;
+  PrivateOffer offer;
+  address taker;
+  bytes32 appData;
 }
 
 /// @dev Raised when the wrapper's declared `offerId` does not match the offer it carries.
@@ -93,12 +93,11 @@ error PrivateTrade_OwnerRoleMismatch(PrivateTradeRole role, address expected, ad
 
 /// @notice View of the settlement context a conditional order validates against.
 interface IPrivateTradeWrapper {
-    /// @notice Offer currently being settled, or `bytes32(0)` outside a private trade settlement.
-    function activeOfferId() external view returns (bytes32);
+  /// @notice Offer currently being settled, or `bytes32(0)` outside a private trade settlement.
+  function activeOfferId() external view returns (bytes32);
 
-    /// @notice Counterparty currently being settled, or `address(0)` outside a private trade settlement.
-    function activeTaker() external view returns (address);
-
+  /// @notice Counterparty currently being settled, or `address(0)` outside a private trade settlement.
+  function activeTaker() external view returns (address);
 }
 
 /// @notice The settlement shape a wrapper accepts, shared with tests and drivers.
@@ -106,11 +105,11 @@ interface IPrivateTradeWrapper {
 /// trades, `[makerOrder, takerOrder]`; every interaction list is empty; and `wrapperData` is
 /// `abi.encode(bytes32 declaredOfferId, PrivateTradeTerms terms)`.
 interface IPrivateTradeSettlement {
-    function wrappedSettle(
-        IERC20[] calldata tokens,
-        uint256[] calldata clearingPrices,
-        GPv2Trade.Data[] calldata trades,
-        GPv2Interaction.Data[][3] calldata interactions,
-        bytes calldata wrapperData
-    ) external;
+  function wrappedSettle(
+    IERC20[] calldata tokens,
+    uint256[] calldata clearingPrices,
+    GPv2Trade.Data[] calldata trades,
+    GPv2Interaction.Data[][3] calldata interactions,
+    bytes calldata wrapperData
+  ) external;
 }
