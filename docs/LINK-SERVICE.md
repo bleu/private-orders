@@ -101,11 +101,29 @@ that the bundle it is about to relay hashes to the digest that was signed *and* 
 recovers to the Shed's owner, so that class of mistake reports itself instead of surfacing as an
 opaque revert.
 
+## Getting the money out
+
+A settled trade pays the order owner, and the owner is the party's Shed — so the tokens arrive in a
+contract only that party can move them out of. Left there, "settled" gives the reader money they have
+no way to reach.
+
+So a settled trade shows a receipt **and** what is sitting in the Shed, with one button that sweeps
+every token in it to the party's wallet. One signature, still no gas, no approval. `script/Withdraw.s.sol`
+computes the bundle, the party signs the digest, and the service relays it.
+
+The relay **replays the computed plan and never recomputes it.** A recomputed deadline is a different
+message, and a signature that is perfectly valid for what was signed fails against it — which is the
+mistake the script made first, and it looked exactly like a broken signature.
+
 ## Known gaps
 
 - **A party signs twice.** The bundle and the permit are separate EIP-712 domains (the Shed's and the
   token's), so they cannot be merged into one message. Two signatures and no transaction beats one
   signature and a transaction for a taker with no ETH, but it is not the theoretical minimum.
+- **Received tokens land in the Shed, which is one extra step.** Every order is built with
+  `receiver: address(0)`, meaning "pay the owner" — and the owner is the Shed. Setting the receiver to
+  the party's wallet would put the tokens there directly and remove the withdrawal entirely. It is a
+  terms change, so it needs a redeploy and re-signing, which is why the button came first.
 - **A permit signed at offer time can expire before settlement.** Its deadline is the offer's, so a
   long-lived offer needs a fresh permit rather than a stale one.
 - **Storage is local files.** Offers live under `out-json/link/`. A deployment needs a database and

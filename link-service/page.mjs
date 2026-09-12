@@ -87,7 +87,7 @@ const post = async (p, body) => {
 // Declared up front: a read of an undeclared name throws, while an assignment to one silently
 // creates a global — so a missing declaration shows up as a broken render, not a missing value.
 let offer = null, me = null, account = null, usable = null, walletName = null, failure = null;
-let check = null, probeResults = [];
+let check = null, probeResults = [], plan = null, moved = null;
 let permitSig = null, bundleSig = null;
 
 // --- wallet discovery ---------------------------------------------------------------------------
@@ -175,7 +175,20 @@ async function load() {
 async function loadRole() {
   if (!account) return render();
   me = await get('/offers/' + id + '/role?address=' + account);
+  // What is sitting in this party's Shed, so a settled trade can end with the money in their wallet
+  // rather than in a contract they have no way to reach.
+  plan = me.role
+    ? await get('/offers/' + id + '/withdraw?address=' + account).catch(() => null)
+    : null;
   render();
+}
+
+/// Symbol and decimals for a token address, using what the trade already told us about its two.
+function tokenOf(address) {
+  const t = offer.terms;
+  if (address.toLowerCase() === t.sellToken.toLowerCase()) return { symbol: t.sellSymbol, decimals: t.sellDecimals };
+  if (address.toLowerCase() === t.buyToken.toLowerCase()) return { symbol: t.buySymbol, decimals: t.buyDecimals };
+  return { symbol: address.slice(0, 6) + '…', decimals: 18 };
 }
 
 // The public view is written from the maker's side. Until we know who is asking, the labels stay
@@ -254,8 +267,37 @@ function render() {
       (offer.settlementTx ? offer.settlementTx : 'recorded, transaction not found') + '</span></div>' +
       '<div class="row"><small>Order</small><small class="addr">' + short(offer.orderUid ?? '') + '</small></div>' +
       '</div>'));
-    app.append(frag('<div class="note ok">What you received is in your Shed, not your wallet. ' +
-      'Moving it out takes one more signed bundle, and there is no button for that yet.</div>'));
+    const held = plan && !plan.empty ? plan.amounts.map((a, i) => ({ ...tokenOf(plan.targets[i]), amount: a })) : [];
+    if (moved) {
+      app.append(frag('<div class="note ok">Moved to your wallet.</div>'));
+    } else if (!held.length) {
+      app.append(frag('<div class="note">Your Shed is empty — everything is in your wallet.</div>'));
+    } else {
+      const what = held.map((h) => amount(h.amount, h.decimals) + ' ' + h.symbol).join(' and ');
+      app.append(frag('<div class="note">' + what + ' is in your Shed, a contract only you control. ' +
+        'One signature moves it to your wallet, and you still pay no gas.</div>'));
+      const move = node('<button>Move ' + what + ' to my wallet</button>');
+      move.onclick = async () => {
+        move.disabled = true;
+        move.textContent = 'Check your wallet…';
+        try {
+          failure = null;
+          const [active] = await usable.request({ method: 'eth_accounts' });
+          if (!active || active.toLowerCase() !== account.toLowerCase()) {
+            throw new Error('The active account in your wallet is ' + (active ? short(active) : 'not set') +
+              ', but this trade is with ' + short(account) + '.');
+          }
+          const signature = await signTyped(plan.typedData);
+          await post('/offers/' + id + '/withdraw', { address: account, signature });
+          moved = true;
+          await loadRole();
+        } catch (err) {
+          failure = describe(err);
+          render();
+        }
+      };
+      app.append(move);
+    }
     return;
   }
 

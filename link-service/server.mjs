@@ -182,6 +182,38 @@ function probes() {
   ];
 }
 
+/// Which side of a trade an address is, or null. Kept in one place so the role view and the
+/// withdrawal agree on who may ask for what.
+function addressRole(offer, who) {
+  if (who === offer.computed.maker.toLowerCase()) return 'maker';
+  if (who === offer.request.taker.toLowerCase()) return 'taker';
+  return null;
+}
+
+/// What the party's Shed holds, as a bundle to sign. Writes the request, runs the computation, and
+/// returns the plan — including `empty: true` when there is nothing to move.
+function withdrawPlan(offer, role) {
+  const side = role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
+  fs.writeFileSync(
+    path.join(ROOT, 'out-json', 'withdraw-request.json'),
+    JSON.stringify(
+      {
+        shedFactory: CONFIG.shedFactory,
+        shed: side.shed,
+        owner: side.owner,
+        // Both tokens: a trade can leave the sell side behind if it was not fully spent.
+        tokens: [offer.computed.sellToken, offer.computed.buyToken],
+      },
+      null,
+      2,
+    ),
+  );
+  execFileSync('forge', ['script', 'script/Withdraw.s.sol', '--rpc-url', RPC], { cwd: ROOT, stdio: 'pipe' });
+  const plan = JSON.parse(fs.readFileSync(path.join(ROOT, 'out-json', 'withdraw-computed.json'), 'utf8'));
+  if (plan.empty) return { empty: true, shed: side.shed };
+  return { ...plan, shed: side.shed, role };
+}
+
 /// Does this signature belong to `address` over this exact typed data?
 ///
 /// Returns null when the question cannot be asked (no typed data, or a malformed signature), so the
@@ -529,6 +561,48 @@ const server = http.createServer(async (req, res) => {
           orderUid: offer.orderUid ?? null,
         });
       }
+
+    // Everything the party's Shed holds, ready to be moved to their wallet. Computing it needs the
+    // chain, so it is the same Solidity that signs it.
+    if (req.method === 'GET' && parts[2] === 'withdraw') {
+      const who = (url.searchParams.get('address') ?? '').toLowerCase();
+      const role = addressRole(offer, who);
+      if (!role) return json(res, 403, { error: 'this link is for a specific wallet' });
+      return json(res, 200, withdrawPlan(offer, role));
+    }
+
+    if (req.method === 'POST' && parts[2] === 'withdraw') {
+      const body = await readBody(req);
+      const role = addressRole(offer, String(body.address ?? '').toLowerCase());
+      if (!role) return json(res, 403, { error: 'this link is for a specific wallet' });
+      if (!/^0x[0-9a-fA-F]{130}$/.test(body.signature ?? '')) {
+        return json(res, 400, { error: 'signature must be 65 bytes, r || s || v' });
+      }
+
+      // The computed plan is replayed, never recomputed: a fresh deadline would build a different
+      // message and reject a signature that is valid for what was signed.
+      const file = path.join(ROOT, 'out-json', 'withdraw-signature.json');
+      fs.writeFileSync(file, JSON.stringify({ signature: body.signature }, null, 2));
+      try {
+        const out = execFileSync(
+          'forge',
+          ['script', 'script/Withdraw.s.sol', '--rpc-url', RPC, '--broadcast'],
+          {
+            cwd: ROOT,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              WITHDRAW_SIGNATURE_FILE: 'out-json/withdraw-signature.json',
+              RELAYER_PRIVATE_KEY: CONFIG.relayerKey,
+            },
+          },
+        );
+        const line = out.split('\n').map((l) => l.trim()).filter((l) => /withdrawn|already/.test(l));
+        return json(res, 200, { moved: true, relay: line });
+      } catch (err) {
+        return json(res, 400, { error: relayReason(String(err.stderr ?? err.message ?? '')) });
+      }
+    }
 
       if (req.method === 'GET' && parts[2] === 'status') return json(res, 200, await status(offer));
 
