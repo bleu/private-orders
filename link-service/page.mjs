@@ -74,6 +74,9 @@ const id = ${JSON.stringify(id)};
 const frag = (h) => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content; };
 const node = (h) => frag(h).firstElementChild;
 const get = async (p) => (await fetch(p)).json();
+let synthetic = [];
+let probeCache = [];
+get('/probes').then((list) => { synthetic = list; });
 const post = async (p, body) => {
   const res = await fetch(p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const out = await res.json();
@@ -81,7 +84,10 @@ const post = async (p, body) => {
   return out;
 };
 
+// Declared up front: a read of an undeclared name throws, while an assignment to one silently
+// creates a global — so a missing declaration shows up as a broken render, not a missing value.
 let offer = null, me = null, account = null, usable = null, walletName = null, failure = null;
+let check = null, probeResults = [];
 let permitSig = null, bundleSig = null;
 
 // --- wallet discovery ---------------------------------------------------------------------------
@@ -248,28 +254,28 @@ function render() {
 
   const funded = BigInt(me.balance) >= BigInt(me.permit.amount);
 
-  const diag = node('<button class="ghost">Run wallet diagnostics</button>');
+  // One signature per press. Four queued prompts is where wallets stall, and a stall is
+  // indistinguishable from a wallet that cannot sign the message at all.
+  const done = probeResults.length >= probeNames().length;
+  const diag = node('<button class="ghost">' +
+    (done
+      ? 'Diagnostics complete'
+      : probeResults.length
+        ? 'Run probe ' + (probeResults.length + 1) + ' of ' + probeNames().length
+        : 'Run wallet diagnostics') +
+    '</button>');
+  diag.disabled = done;
   diag.onclick = async () => {
     diag.disabled = true;
-    diag.textContent = 'Signing ' + (await get('/probes')).length + ' probes…';
+    diag.textContent = 'Check your wallet…';
     try {
-      // The synthetic probes establish whether the wallet can sign typed data at all; the two real
-      // messages are what actually fails, and the comparison is the diagnostic.
-      const list = [
-        ...(await get('/probes')),
-        { name: '3. the permit for this trade', typedData: me.permit.typedData },
-        { name: '4. the order authorisation for this trade', typedData: me.bundle.typedData },
-      ];
-      const signatures = [];
-      for (const probe of list) {
-        signatures.push({
-          name: probe.name,
-          typedData: probe.typedData,
-          signature: await signTyped(probe.typedData),
-        });
-      }
-      const out = await post('/probes', { address: account, signatures });
-      results = out.results;
+      const probe = probeNames()[probeResults.length];
+      const signature = await signTyped(probe.typedData);
+      const out = await post('/probes', {
+        address: account,
+        signatures: [{ name: probe.name, typedData: probe.typedData, signature }],
+      });
+      probeResults.push(out.results[0]);
     } catch (err) {
       failure = describe(err);
     }
@@ -349,8 +355,8 @@ function render() {
     app.append(frag('<div class="note">Order is with the solvers.<div class="bar"><i></i></div></div>'));
   }
 
-  if (results) {
-    app.append(frag('<div class="note"><b>Typed-data probes</b>' + results
+  if (probeResults.length) {
+    app.append(frag('<div class="note"><b>Typed-data probes</b>' + probeResults
       .map((r) => '<br>' + (r.ok ? '<span class="ok">ok</span>' : '<span class="warn">failed</span>') + ' — ' + r.name)
       .join('') + '</div>'));
   }
@@ -361,6 +367,20 @@ function render() {
     '<p class="addr">bundle digest ' + me.bundle.digest + '</p>' +
     (me.permit.digest ? '<p class="addr">permit digest ' + me.permit.digest + '</p>' : '') +
     '</details>'));
+}
+
+/// The two synthetic probes, then the two real messages for this trade. A synthetic pass with a
+/// real failure points at the payload; a synthetic failure means the wallet is not hashing what it
+/// shows.
+function probeNames() {
+  if (!probeCache.length) {
+    probeCache = [
+      ...synthetic,
+      { name: '3. the permit for this trade', typedData: me.permit.typedData },
+      { name: '4. the order authorisation for this trade', typedData: me.bundle.typedData },
+    ];
+  }
+  return probeCache;
 }
 
 function signTyped(typedData) {
