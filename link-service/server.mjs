@@ -132,6 +132,56 @@ function relay(computed, signatures) {
     .filter((line) => line.includes('permit applied') || line.includes('digest matches') || line.includes('relayed'));
 }
 
+const PROBE_DOMAIN = {
+  name: 'PrivateTradeProbe',
+  version: '1',
+  chainId: 1,
+  verifyingContract: '0x0000000000000000000000000000000000000001',
+};
+
+/// Diagnostics, not payloads: each probe adds one feature, so the first failure names the culprit.
+function probes() {
+  return [
+    {
+      name: '1. one uint256',
+      typedData: {
+        primaryType: 'Probe',
+        domain: PROBE_DOMAIN,
+        types: { Probe: [{ name: 'value', type: 'uint256' }] },
+        message: { value: '42' },
+      },
+    },
+    {
+      name: '2. array of a struct holding bytes',
+      typedData: {
+        primaryType: 'Probe',
+        domain: PROBE_DOMAIN,
+        types: {
+          Probe: [{ name: 'items', type: 'Item[]' }],
+          Item: [
+            { name: 'target', type: 'address' },
+            { name: 'value', type: 'uint256' },
+            { name: 'callData', type: 'bytes' },
+            { name: 'allowFailure', type: 'bool' },
+            { name: 'isDelegateCall', type: 'bool' },
+          ],
+        },
+        message: {
+          items: [
+            {
+              target: '0x6b175474e89094c44da98b954eedeac495271d0f',
+              value: '0',
+              callData: '0x095ea7b3000000000000000000000000c92e8bdf79f0507f65a392b0ab4667716bfe0110',
+              allowFailure: false,
+              isDelegateCall: false,
+            },
+          ],
+        },
+      },
+    },
+  ];
+}
+
 /// Does this signature belong to `address` over this exact typed data?
 ///
 /// Returns null when the question cannot be asked (no typed data, or a malformed signature), so the
@@ -310,6 +360,29 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && parts[0] === 'health') return json(res, 200, { ok: true });
 
+    // Typed-data probes, simplest first. Every one of these is canonical EIP-712, so a wallet that
+    // signs them all correctly and still cannot sign the bundle tells us the problem is one specific
+    // feature of the struct — and if even the simplest fails, the wallet is not hashing what it shows.
+    if (req.method === 'GET' && parts[0] === 'probes') {
+      return json(res, 200, probes());
+    }
+
+    if (req.method === 'POST' && parts[0] === 'probes') {
+      const body = await readBody(req);
+      const results = body.signatures.map(({ name, signature, typedData }) => {
+        const file = path.join(ROOT, 'out-json', 'probe.json');
+        fs.writeFileSync(file, JSON.stringify(typedData));
+        const res2 = spawnSync(
+          'cast',
+          ['wallet', 'verify', '--address', body.address, '--data', '--from-file', file, signature],
+          { encoding: 'utf8' },
+        );
+        console.log('probe', name, res2.status === 0 ? 'OK' : 'FAIL', signature);
+        return { name, ok: res2.status === 0 };
+      });
+      return json(res, 200, { address: body.address, results });
+    }
+
     // A diagnostic: the wallet signs a message this service chose, and we recover the signer. It
     // separates "the wallet is on a different key" from "the wallet hashed a different message" —
     // a distinction no amount of guesswork about typed-data encodings can make.
@@ -332,7 +405,7 @@ const server = http.createServer(async (req, res) => {
         },
       );
       const recovered = (out.match(/recovered (0x[0-9a-fA-F]{40})/) ?? [])[1] ?? null;
-      console.log('wallet-check', body.address, 'recovered', recovered, body.signature);
+      console.log('wallet-check', body.address, 'recovered', recovered, 'chainId', body.chainId, body.signature);
       return json(res, 200, {
         claimed: body.address,
         recovered,

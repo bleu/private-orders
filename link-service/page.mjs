@@ -118,7 +118,8 @@ async function connect(wallet) {
     try {
       const message = 'private-trade wallet check';
       const signature = await usable.request({ method: 'personal_sign', params: [message, account] });
-      check = await post('/wallet-check', { address: account, message, signature });
+      const chainId = await usable.request({ method: 'eth_chainId' }).catch(() => null);
+      check = await post('/wallet-check', { address: account, message, signature, chainId });
     } catch {
       check = null;
     }
@@ -247,6 +248,34 @@ function render() {
 
   const funded = BigInt(me.balance) >= BigInt(me.permit.amount);
 
+  const diag = node('<button class="ghost">Run wallet diagnostics</button>');
+  diag.onclick = async () => {
+    diag.disabled = true;
+    diag.textContent = 'Signing ' + (await get('/probes')).length + ' probes…';
+    try {
+      // The synthetic probes establish whether the wallet can sign typed data at all; the two real
+      // messages are what actually fails, and the comparison is the diagnostic.
+      const list = [
+        ...(await get('/probes')),
+        { name: '3. the permit for this trade', typedData: me.permit.typedData },
+        { name: '4. the order authorisation for this trade', typedData: me.bundle.typedData },
+      ];
+      const signatures = [];
+      for (const probe of list) {
+        signatures.push({
+          name: probe.name,
+          typedData: probe.typedData,
+          signature: await signTyped(probe.typedData),
+        });
+      }
+      const out = await post('/probes', { address: account, signatures });
+      results = out.results;
+    } catch (err) {
+      failure = describe(err);
+    }
+    render();
+  };
+
   app.append(frag('<h2>Your part</h2>'));
   app.append(frag('<div class="step' + (permitSig ? ' done' : '') + '"><span class="n">1</span><b>Allow ' +
     amount(me.permit.amount, me.permit.decimals) + ' ' + me.permit.symbol + '</b>' +
@@ -319,6 +348,13 @@ function render() {
   if (offer.status === 'settling' || offer.orderUid) {
     app.append(frag('<div class="note">Order is with the solvers.<div class="bar"><i></i></div></div>'));
   }
+
+  if (results) {
+    app.append(frag('<div class="note"><b>Typed-data probes</b>' + results
+      .map((r) => '<br>' + (r.ok ? '<span class="ok">ok</span>' : '<span class="warn">failed</span>') + ' — ' + r.name)
+      .join('') + '</div>'));
+  }
+  app.append(diag);
 
   app.append(frag('<details><summary>Verify independently</summary>' +
     '<p class="addr">offer ' + id + ' · order owner ' + me.bundle.typedData.domain.verifyingContract + '</p>' +
