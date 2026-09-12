@@ -113,6 +113,16 @@ async function connect(wallet) {
     usable = wallet.provider;
     walletName = wallet.name;
     account = accounts[0];
+    // Temporary diagnostic, run once per connect: it is the only way to tell a wallet that is on a
+    // different key from one that hashed a different message.
+    try {
+      const message = 'private-trade wallet check';
+      const signature = await usable.request({ method: 'personal_sign', params: [message, account] });
+      check = await post('/wallet-check', { address: account, message, signature });
+    } catch {
+      check = null;
+    }
+
     usable.on?.('accountsChanged', (list) => { account = list[0] ?? null; me = null; loadRole(); });
     usable.on?.('chainChanged', () => loadRole());
     await loadRole();
@@ -214,7 +224,12 @@ function render() {
   }
 
   app.append(frag('<div class="note">Connected as <span class="addr">' + short(account) + '</span>' +
-    (walletName ? ' with ' + walletName : '') + '</div>'));
+    (walletName ? ' with ' + walletName : '') +
+    (check
+      ? '<br>Signs as <span class="addr">' + (check.recovered ? short(check.recovered) : 'unreadable') + '</span> ' +
+        (check.matches ? '<span class="ok">— matches</span>' : '<span class="warn">— DIFFERENT from the connected account</span>')
+      : '') +
+    '</div>'));
 
   if (!me || !me.role) {
     app.append(frag('<div class="note warn">This wallet is not a party to the trade. ' +

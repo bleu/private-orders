@@ -310,6 +310,36 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && parts[0] === 'health') return json(res, 200, { ok: true });
 
+    // A diagnostic: the wallet signs a message this service chose, and we recover the signer. It
+    // separates "the wallet is on a different key" from "the wallet hashed a different message" —
+    // a distinction no amount of guesswork about typed-data encodings can make.
+    if (req.method === 'POST' && parts[0] === 'wallet-check') {
+      const body = await readBody(req);
+      const file = path.join(ROOT, 'out-json', 'wallet-check.json');
+      fs.writeFileSync(file, JSON.stringify(body, null, 2));
+      const out = execFileSync(
+        'forge',
+        ['script', 'script/Diagnose.s.sol', '--rpc-url', RPC],
+        {
+          cwd: ROOT,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            DIAG_MESSAGE: body.message,
+            DIAG_SIG_FILE: 'out-json/wallet-check.json',
+            COMPOSABLE_COW_ADDRESS: CONFIG.composableCoW ?? '',
+          },
+        },
+      );
+      const recovered = (out.match(/recovered (0x[0-9a-fA-F]{40})/) ?? [])[1] ?? null;
+      console.log('wallet-check', body.address, 'recovered', recovered, body.signature);
+      return json(res, 200, {
+        claimed: body.address,
+        recovered,
+        matches: recovered?.toLowerCase() === String(body.address).toLowerCase(),
+      });
+    }
+
     if (req.method === 'POST' && parts[0] === 'offers' && parts.length === 1) {
       const body = await readBody(req);
       // Explicitly enumerated: CONFIG also holds the relayer key, and this object is written to disk.
