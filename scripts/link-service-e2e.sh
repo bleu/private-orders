@@ -65,6 +65,9 @@ cast rpc anvil_stopImpersonatingAccount "${MANAGER}" --rpc-url "${RPC}" >/dev/nu
 
 # --- 2. service ---------------------------------------------------------------------------------
 
+# The page builds a program inside a template literal, so an unescaped quote has broken it twice.
+node "${ROOT}/scripts/check-page.mjs" || exit 1
+
 log "starting the sub-solver"
 pkill -f private-trade-solver 2>/dev/null || true
 rm -rf out-json/sub-solver-offers; mkdir -p out-json/sub-solver-offers

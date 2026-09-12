@@ -73,7 +73,8 @@ contract LinkRelay is Script {
     require(
       signer == permit.owner,
       string.concat(
-        bundleKey, ": permit signature recovers to ", vm.toString(signer), ", not ", vm.toString(permit.owner)
+        bundleKey, ": permit signature recovers to ", vm.toString(signer), ", not ", vm.toString(permit.owner),
+        ". This usually means the wallet signed with a different account than the one the trade is with."
       )
     );
 

@@ -257,6 +257,18 @@ function render() {
     try {
       failure = null;
       go.textContent = 'Check your wallet…';
+
+      // Wallets sign with whatever account is *active*, which is not necessarily the one this page
+      // connected with — Rabby will happily sign with a different account and the signature then
+      // recovers to someone else. Re-read it here, so the mismatch is a sentence rather than a
+      // failed relay several steps later.
+      const [active] = await usable.request({ method: 'eth_accounts' });
+      if (!active || active.toLowerCase() !== account.toLowerCase()) {
+        throw new Error(
+          'The active account in your wallet is ' + (active ? short(active) : 'not set') +
+          ', but this trade is with ' + short(account) + '. Switch the wallet to that account and try again.'
+        );
+      }
       permitSig = me.permit.typedDataAvailable && me.permit.typedData
         ? await signTyped(me.permit.typedData)
         : await usable.request({ method: 'personal_sign', params: [me.permit.digest, account] });

@@ -409,7 +409,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && parts[0] === 'o' && parts[1]) {
       const offer = loadOffer(parts[1]);
       if (!offer) return json(res, 404, { error: 'unknown offer' });
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(render(offer.id));
+      // No caching: this page is served by a service that changes, and a stale copy looks exactly
+      // like a bug in the page.
+      res
+        .writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+        .end(render(offer.id));
       return;
     }
 
