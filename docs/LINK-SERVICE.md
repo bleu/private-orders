@@ -101,15 +101,30 @@ that the bundle it is about to relay hashes to the digest that was signed *and* 
 recovers to the Shed's owner, so that class of mistake reports itself instead of surfacing as an
 opaque revert.
 
-## Getting the money out
+## Where the money lands
 
-A settled trade pays the order owner, and the owner is the party's Shed — so the tokens arrive in a
-contract only that party can move them out of. Left there, "settled" gives the reader money they have
-no way to reach.
+Each order is built with `receiver` set to **the party's own wallet**. The Shed owns the order, but
+the proceeds belong to the person, so a settlement pays the wallet directly and nothing is left in a
+contract afterwards. Before this, the receiver was the owner — the Shed — and every trade ended with
+the reader owning tokens they had no way to move.
 
-So a settled trade shows a receipt **and** what is sitting in the Shed, with one button that sweeps
-every token in it to the party's wallet. One signature, still no gas, no approval. `script/Withdraw.s.sol`
-computes the bundle, the party signs the digest, and the service relays it.
+The beneficiary is declared in the terms rather than read from the Shed while building the order,
+for two reasons: orders are built before the Sheds exist, and a Shed's admin is not readable from
+outside it. The proxy answers `admin()` only when the caller is the proxy itself, so the
+implementation can read it and nobody else can. A service that always sets the beneficiary to the
+party's own wallet, and shows that address on the page, is what makes it safe — an on-chain check
+would need the bundle to delegatecall a helper, which is the only context where a Shed can read its
+own admin.
+
+## Getting the money out, if anything is left
+
+Nothing should be left, now that proceeds are paid to the wallet. But a trade settled before that
+change, or sell tokens the trade did not spend, can still sit in a Shed — and a Shed is a contract
+only its owner can move them out of.
+
+So a settled trade shows a receipt **and** whatever is still in the Shed, with one button that sweeps
+every token in it to the party's wallet. One signature, still no gas, no approval.
+`script/Withdraw.s.sol` computes the bundle, the party signs the digest, and the service relays it.
 
 The relay **replays the computed plan and never recomputes it.** A recomputed deadline is a different
 message, and a signature that is perfectly valid for what was signed fails against it — which is the

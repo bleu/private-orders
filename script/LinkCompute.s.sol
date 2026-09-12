@@ -220,7 +220,9 @@ contract LinkCompute is Script {
     json = '{"sellToken":"';
     json = string.concat(json, vm.toString(terms.offer.sellToken));
     json = string.concat(json, '","buyToken":"', vm.toString(terms.offer.buyToken));
-    json = string.concat(json, '","receiver":"', vm.toString(address(0)));
+    // Taken from the order the library builds, not repeated here: a hand-written field is how this
+    // one stayed at zero after the order started paying a beneficiary.
+    json = string.concat(json, '","receiver":"', vm.toString(PrivateTradeLib.makerOrder(terms, appData).receiver));
     json = string.concat(json, '","sellAmount":"', vm.toString(terms.offer.sellAmount));
     json = string.concat(json, '","buyAmount":"', vm.toString(terms.offer.buyAmount));
     json = string.concat(json, '","partiallyFillable":false,"validTo":');
@@ -246,6 +248,7 @@ contract LinkCompute is Script {
     json = '{"sellToken":"';
     json = string.concat(json, vm.toString(terms.offer.buyToken));
     json = string.concat(json, '","buyToken":"', vm.toString(terms.offer.sellToken));
+    json = string.concat(json, '","receiver":"', vm.toString(PrivateTradeLib.takerOrder(terms, appData).receiver));
     json = string.concat(json, '","sellAmount":"', vm.toString(terms.offer.buyAmount));
     json = string.concat(json, '","buyAmount":"', vm.toString(terms.offer.sellAmount));
     json = string.concat(json, '","validTo":', vm.toString(uint256(terms.offer.validTo)));
@@ -292,7 +295,10 @@ contract LinkCompute is Script {
         validTo: uint32(block.timestamp + request.validFor),
         salt: keccak256(abi.encode("private-trade-link", request.maker, request.buyToken, block.timestamp))
       }),
-      taker: COWShedFactory(request.shedFactory).proxyOf(request.allowedTaker)
+      taker: COWShedFactory(request.shedFactory).proxyOf(request.allowedTaker),
+      // Proceeds go to the parties' own wallets, not to the Sheds that hold the orders.
+      makerBeneficiary: request.maker,
+      takerBeneficiary: request.allowedTaker
     });
   }
 

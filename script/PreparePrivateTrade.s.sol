@@ -77,7 +77,9 @@ contract PreparePrivateTrade is Script {
         validTo: uint32(block.timestamp + c.validFor),
         salt: keccak256(abi.encode("private-trade-offline", c.makerShed, c.takerShed, block.timestamp))
       }),
-      taker: c.takerShed
+      taker: c.takerShed,
+      makerBeneficiary: c.makerEoa,
+      takerBeneficiary: c.takerEoa
     });
 
     (

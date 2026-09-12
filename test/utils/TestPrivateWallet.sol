@@ -27,6 +27,12 @@ contract TestPrivateWallet is ERC1271Forwarder {
     _;
   }
 
+  /// @dev The same accessor a CoW Shed exposes, so a trade pays this wallet's owner exactly as it
+  /// would pay a Shed's.
+  function admin() external view returns (address) {
+    return OWNER;
+  }
+
   function approve(address token, address spender, uint256 amount) external onlyOwner {
     IERC20(token).approve(spender, amount);
   }

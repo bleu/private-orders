@@ -46,10 +46,7 @@ contract Diagnose is Script {
 
       console.log("expected", expected);
       _try(
-        "canonical, chainId 1",
-        _wrap(_domain(probeContract, "PrivateTradeProbe", "1", 1), structHash),
-        sig,
-        expected
+        "canonical, chainId 1", _wrap(_domain(probeContract, "PrivateTradeProbe", "1", 1), structHash), sig, expected
       );
       _try(
         "no 1901 prefix",
@@ -67,8 +64,38 @@ contract Diagnose is Script {
 
       uint256[] memory sweep = new uint256[](32);
       uint256[32] memory list = [
-        uint256(0), 1, 3, 4, 5, 10, 25, 56, 97, 100, 137, 250, 324, 336, 420, 480,
-        1088, 1284, 1337, 5000, 8453, 17000, 31337, 42161, 42220, 43114, 59144, 80002, 84532, 11155111, 534352, 81457
+        uint256(0),
+        1,
+        3,
+        4,
+        5,
+        10,
+        25,
+        56,
+        97,
+        100,
+        137,
+        250,
+        324,
+        336,
+        420,
+        480,
+        1088,
+        1284,
+        1337,
+        5000,
+        8453,
+        17000,
+        31337,
+        42161,
+        42220,
+        43114,
+        59144,
+        80002,
+        84532,
+        11155111,
+        534352,
+        81457
       ];
       for (uint256 i = 0; i < list.length; ++i) {
         sweep[i] = list[i];
@@ -79,12 +106,7 @@ contract Diagnose is Script {
           expected
         );
       }
-      _try(
-        "version ''",
-        _wrap(_domain(probeContract, "PrivateTradeProbe", "", 1), structHash),
-        sig,
-        expected
-      );
+      _try("version ''", _wrap(_domain(probeContract, "PrivateTradeProbe", "", 1), structHash), sig, expected);
 
       // Every ordering of the domain's four fields in the type string, against the submitted
       // signature and then against a known-correct one. The second run validates the sweep: if order
@@ -110,9 +132,8 @@ contract Diagnose is Script {
       string memory message = vm.envString("DIAG_MESSAGE");
       bytes memory sig = vm.parseJsonBytes(vm.readFile(vm.envString("DIAG_SIG_FILE")), ".signature");
       address claimed = vm.parseJsonAddress(vm.readFile(vm.envString("DIAG_SIG_FILE")), ".address");
-      bytes32 digest = keccak256(
-        abi.encodePacked("\x19Ethereum Signed Message:\n", Strings.toString(bytes(message).length), message)
-      );
+      bytes32 digest =
+        keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", Strings.toString(bytes(message).length), message));
       console.log("claimed  ", claimed);
       console.log("recovered", _recover(digest, sig));
       return;
@@ -148,12 +169,19 @@ contract Diagnose is Script {
     console.log("== permit ==");
     console.log("-- if the two signatures recover to the same address, both prompts were the same message --");
     _try("eip2612, our domain", _wrap(_domain(token, "Dai Stablecoin", "1", block.chainid), structHash), sig, owner);
-    _try("  the *bundle* signature under this", _wrap(_domain(token, "Dai Stablecoin", "1", block.chainid), structHash), otherSig, owner);
+    _try(
+      "  the *bundle* signature under this",
+      _wrap(_domain(token, "Dai Stablecoin", "1", block.chainid), structHash),
+      otherSig,
+      owner
+    );
     _try("json string as a message", _eip191String(permitJson), sig, owner);
     _try("  the *bundle* signature under this", _eip191String(permitJson), otherSig, owner);
     _try("keccak of the json", keccak256(bytes(permitJson)), sig, owner);
     _try("dai-shaped struct", _wrap(_domain(token, "Dai Stablecoin", "1", block.chainid), daiStructHash), sig, owner);
-    _try("eip191 over ours", _eip191(_wrap(_domain(token, "Dai Stablecoin", "1", block.chainid), structHash)), sig, owner);
+    _try(
+      "eip191 over ours", _eip191(_wrap(_domain(token, "Dai Stablecoin", "1", block.chainid), structHash)), sig, owner
+    );
     _try("struct hash alone", structHash, sig, owner);
 
     for (uint256 i = 0; i < chains.length; ++i) {
@@ -214,11 +242,7 @@ contract Diagnose is Script {
     }
   }
 
-  function _executeHooksHash(Call[] memory calls, bytes32 nonce, uint256 deadline)
-    private
-    pure
-    returns (bytes32)
-  {
+  function _executeHooksHash(Call[] memory calls, bytes32 nonce, uint256 deadline) private pure returns (bytes32) {
     bytes32[] memory hashes = new bytes32[](calls.length);
     for (uint256 i = 0; i < calls.length; ++i) {
       hashes[i] = keccak256(
@@ -257,12 +281,7 @@ contract Diagnose is Script {
             uint256[4] memory order = [a, b, c, d];
             _try(
               string.concat(
-                label,
-                " order ",
-                Strings.toString(a),
-                Strings.toString(b),
-                Strings.toString(c),
-                Strings.toString(d)
+                label, " order ", Strings.toString(a), Strings.toString(b), Strings.toString(c), Strings.toString(d)
               ),
               _wrap(_orderedSeparator(order, "PrivateTradeProbe", "1", 1, probeContract), structHash),
               sig,
@@ -297,9 +316,7 @@ contract Diagnose is Script {
     values[3] = bytes32(uint256(uint160(verifying)));
 
     return keccak256(
-      abi.encode(
-        keccak256(typeString), values[order[0]], values[order[1]], values[order[2]], values[order[3]]
-      )
+      abi.encode(keccak256(typeString), values[order[0]], values[order[1]], values[order[2]], values[order[3]])
     );
   }
 
@@ -308,13 +325,16 @@ contract Diagnose is Script {
     uint256 end = b.length;
     while (end > 0 && (b[end - 1] == "\n" || b[end - 1] == " " || b[end - 1] == "\r")) end--;
     bytes memory out = new bytes(end);
-    for (uint256 i = 0; i < end; ++i) out[i] = b[i];
+    for (uint256 i = 0; i < end; ++i) {
+      out[i] = b[i];
+    }
     return string(out);
   }
 
   /// @dev `personal_sign` over a string payload.
   function _eip191String(string memory message) private pure returns (bytes32) {
-    return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", Strings.toString(bytes(message).length), message));
+    return
+      keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", Strings.toString(bytes(message).length), message));
   }
 
   /// @dev What `personal_sign` produces for a 32-byte payload.

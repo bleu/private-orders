@@ -21,6 +21,7 @@ import {IConditionalOrder} from "composable-cow/interfaces/IConditionalOrder.sol
 import {PrivateTradeWrapper} from "../../src/PrivateTradeWrapper.sol";
 import {PrivateTradeOrder} from "../../src/PrivateTradeOrder.sol";
 import {PrivateTradeLib} from "../../src/libraries/PrivateTradeLib.sol";
+
 import {PrivateTradeBuilder} from "../../src/libraries/PrivateTradeBuilder.sol";
 import {PrivateOffer, PrivateTradeTerms, PrivateTradeRole} from "../../src/interfaces/IPrivateTrade.sol";
 
@@ -96,6 +97,19 @@ abstract contract PrivateTradeTestBase is Test {
     return _termsFor(address(alice), taker, allowedTaker);
   }
 
+  /// @dev Terms with explicit beneficiaries, for fixtures whose order owners are real Sheds.
+  function _termsFull(
+    address maker,
+    address taker,
+    address allowedTaker,
+    address makerBeneficiary,
+    address takerBeneficiary
+  ) internal view returns (PrivateTradeTerms memory terms) {
+    terms = _termsFor(maker, taker, allowedTaker);
+    terms.makerBeneficiary = makerBeneficiary;
+    terms.takerBeneficiary = takerBeneficiary;
+  }
+
   /// @dev Same as `_terms`, but with an arbitrary maker. Used when the order owner is a CoW Shed
   /// rather than a test wallet.
   function _termsFor(address maker, address taker, address allowedTaker)
@@ -114,8 +128,19 @@ abstract contract PrivateTradeTestBase is Test {
         validTo: uint32(block.timestamp + 1 days),
         salt: keccak256(abi.encode("private-trade", maker, taker, allowedTaker))
       }),
-      taker: taker
+      taker: taker,
+      makerBeneficiary: _walletOwner(maker),
+      takerBeneficiary: _walletOwner(taker)
     });
+  }
+
+  /// @dev The wallet a fixture's order owner belongs to. A Shed's admin is not readable from outside
+  /// it — the proxy answers `admin()` only to itself — so a caller using real Sheds passes the EOAs
+  /// explicitly with `_termsFull`.
+  function _walletOwner(address who) internal view returns (address) {
+    if (who == address(alice)) return aliceOwner;
+    if (who == address(bob)) return bobOwner;
+    return who;
   }
 
   function _fund(TestPrivateWallet wallet, TestERC20 token, uint256 amount) internal {

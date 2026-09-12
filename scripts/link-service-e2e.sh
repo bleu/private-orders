@@ -32,15 +32,36 @@ reset_allowance() {
   cast rpc anvil_stopImpersonatingAccount "${owner}" --rpc-url "${RPC}" >/dev/null
 }
 
-# The four balances that move when the pair settles: the two sell tokens, and the two received
-# tokens. Printed as one line so a caller can read them into variables.
+# The four balances that move when the pair settles. The received side lands in the parties' own
+# wallets: the Shed holds the sell tokens, but the proceeds belong to the person.
 snapshot() {
   printf '%s %s %s %s\n' \
-    "$(cast call "${USDC_ADDRESS}" "balanceOf(address)(uint256)" "${MAKER_SHED}" --rpc-url "${RPC}" | awk '{print $1}')" \
+    "$(cast call "${USDC_ADDRESS}" "balanceOf(address)(uint256)" "${MAKER}" --rpc-url "${RPC}" | awk '{print $1}')" \
+    "$(cast call "${DAI_ADDRESS}" "balanceOf(address)(uint256)" "${MAKER}" --rpc-url "${RPC}" | awk '{print $1}')" \
+    "$(cast call "${DAI_ADDRESS}" "balanceOf(address)(uint256)" "${TAKER}" --rpc-url "${RPC}" | awk '{print $1}')" \
+    "$(cast call "${USDC_ADDRESS}" "balanceOf(address)(uint256)" "${TAKER}" --rpc-url "${RPC}" | awk '{print $1}')"
+}
+
+# What the Sheds hold. After a settlement both are empty on the received side, which is the whole
+# point of paying the wallets: nothing is stranded in a contract.
+shed_balances() {
+  printf '%s %s\n' \
     "$(cast call "${DAI_ADDRESS}" "balanceOf(address)(uint256)" "${MAKER_SHED}" --rpc-url "${RPC}" | awk '{print $1}')" \
-    "$(cast call "${DAI_ADDRESS}" "balanceOf(address)(uint256)" "${TAKER_SHED}" --rpc-url "${RPC}" | awk '{print $1}')" \
     "$(cast call "${USDC_ADDRESS}" "balanceOf(address)(uint256)" "${TAKER_SHED}" --rpc-url "${RPC}" | awk '{print $1}')"
 }
+
+log() { printf '\n==> %s\n' "$*"; }
+
+# Impersonated, test-only: clears an allowance so the permit path is genuinely exercised. The
+# nonces are captured after this, so the "no transaction" assertion still holds for the real flow.
+reset_allowance() {
+  local token=$1 owner=$2 spender=$3
+  cast rpc anvil_impersonateAccount "${owner}" --rpc-url "${RPC}" >/dev/null
+  cast send "${token}" "approve(address,uint256)" "${spender}" 0 \
+    --from "${owner}" --unlocked --rpc-url "${RPC}" >/dev/null
+  cast rpc anvil_stopImpersonatingAccount "${owner}" --rpc-url "${RPC}" >/dev/null
+}
+
 jqq() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 
 set -a; source "${OFFLINE_DIR}/.env"; set +a
@@ -157,6 +178,8 @@ TAKER_NONCE=$(cast nonce "${TAKER}" --rpc-url "${RPC}")
 TAKER_PERMIT=$(echo "${VIEW}" | jqq "d['funding']['digest']")
 
 read -r M0 MD0 T0 TU0 <<< "$(snapshot)"
+# The Sheds hold whatever earlier runs left; what matters is that a settlement adds nothing to them.
+read -r SHED_DAI0 SHED_USDC0 <<< "$(shed_balances)"
 
 log "taker accepts"
 signs_alike "$(typed_data takerBundle bundleTypedData)" "${TAKER_DIGEST}" "${TAKER_KEY}" "taker's bundle"
@@ -198,7 +221,15 @@ read -r M1 MD1 T1 TU1 <<< "$(snapshot)"
 
 log "settled"
 echo "   neither party sent a transaction (maker nonce ${MAKER_NONCE}, taker nonce ${TAKER_NONCE})"
-echo "   maker shed USDC ${M0} -> ${M1}   (sold)"
-echo "   maker shed DAI  ${MD0} -> ${MD1}   (received)"
-echo "   taker shed DAI  ${T0} -> ${T1}   (sold)"
-echo "   taker shed USDC ${TU0} -> ${TU1}   (received)"
+echo "   maker wallet USDC ${M0} -> ${M1}   (sold)"
+echo "   maker wallet DAI  ${MD0} -> ${MD1}   (received)"
+echo "   taker wallet DAI  ${T0} -> ${T1}   (sold)"
+echo "   taker wallet USDC ${TU0} -> ${TU1}   (received)"
+
+# The proceeds went to the people, not to the contracts that hold the orders: neither Shed gained.
+read -r SHED_DAI1 SHED_USDC1 <<< "$(shed_balances)"
+[ "${SHED_DAI1}" = "${SHED_DAI0}" ] || { echo "FAILED: the maker's Shed gained ${SHED_DAI1} DAI" >&2; exit 1; }
+[ "${SHED_USDC1}" = "${SHED_USDC0}" ] || { echo "FAILED: the taker's Shed gained ${SHED_USDC1} USDC" >&2; exit 1; }
+echo "   neither Shed gained anything"
+[ "${MD1}" != "${MD0}" ] || { echo "FAILED: the maker wallet did not receive DAI" >&2; exit 1; }
+[ "${TU1}" != "${TU0}" ] || { echo "FAILED: the taker wallet did not receive USDC" >&2; exit 1; }

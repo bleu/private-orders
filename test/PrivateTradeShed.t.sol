@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity >=0.8.0 <0.9.0;
 
+import {console} from "forge-std/console.sol";
 import {IERC20} from "cowprotocol/contracts/interfaces/IERC20.sol";
 import {IConditionalOrder} from "composable-cow/interfaces/IConditionalOrder.sol";
 import {ComposableCoW} from "composable-cow/ComposableCoW.sol";
@@ -57,7 +58,7 @@ contract PrivateTradeShedTest is PrivateTradeTestBase {
   /// @dev The whole flow: two EOAs, two Sheds, one settlement. Tokens land in the Sheds, which
   /// their owners control.
   function test_settlesWithShedOwnedOrders() public {
-    PrivateTradeTerms memory terms = _termsFor(aliceShed, bobShed, bobShed);
+    PrivateTradeTerms memory terms = _termsFull(aliceShed, bobShed, bobShed, aliceEoa, bobEoa);
 
     IConditionalOrder.ConditionalOrderParams memory makerParams = _params(PrivateTradeRole.Maker, terms, "maker");
     IConditionalOrder.ConditionalOrderParams memory takerParams = _params(PrivateTradeRole.Taker, terms, "taker");
@@ -76,15 +77,20 @@ contract PrivateTradeShedTest is PrivateTradeTestBase {
     wrapper.wrappedSettle(_settleData(terms, makerParams, takerParams), _chainedWrapperData(terms));
 
     assertEq(usdc.balanceOf(aliceShed), 0, "shed still holds USDC");
-    assertEq(wbtc.balanceOf(aliceShed), WBTC_AMOUNT, "alice shed did not receive WBTC");
     assertEq(wbtc.balanceOf(bobShed), 0, "shed still holds WBTC");
-    assertEq(usdc.balanceOf(bobShed), USDC_AMOUNT, "bob shed did not receive USDC");
+
+    // The Shed owns the order, but the proceeds belong to the party: they are paid to the wallet
+    // that controls the Shed, not to the Shed, so nobody has to withdraw them afterwards.
+    assertEq(wbtc.balanceOf(aliceEoa), WBTC_AMOUNT, "alice's wallet did not receive WBTC");
+    assertEq(usdc.balanceOf(bobEoa), USDC_AMOUNT, "bob's wallet did not receive USDC");
+    assertEq(wbtc.balanceOf(aliceShed), 0, "alice's shed received the proceeds");
+    assertEq(usdc.balanceOf(bobShed), 0, "bob's shed received the proceeds");
   }
 
   /// @dev The Shed has to authorise the order. With the approval in place but no `create` call,
   /// the signature path works and ComposableCoW itself refuses the order.
   function test_orderMustBeAuthorisedByTheShed() public {
-    PrivateTradeTerms memory terms = _termsFor(aliceShed, bobShed, bobShed);
+    PrivateTradeTerms memory terms = _termsFull(aliceShed, bobShed, bobShed, aliceEoa, bobEoa);
     IConditionalOrder.ConditionalOrderParams memory makerParams = _params(PrivateTradeRole.Maker, terms, "maker");
     IConditionalOrder.ConditionalOrderParams memory takerParams = _params(PrivateTradeRole.Taker, terms, "taker");
 
@@ -111,7 +117,7 @@ contract PrivateTradeShedTest is PrivateTradeTestBase {
   /// @dev The signed bundle is bound to the Shed address, so a relayer cannot replay Alice's
   /// bundle onto Bob's Shed.
   function test_bundleSignatureIsBoundToTheShed() public {
-    PrivateTradeTerms memory terms = _termsFor(aliceShed, bobShed, bobShed);
+    PrivateTradeTerms memory terms = _termsFull(aliceShed, bobShed, bobShed, aliceEoa, bobEoa);
     IConditionalOrder.ConditionalOrderParams memory makerParams = _params(PrivateTradeRole.Maker, terms, "maker");
 
     Call[] memory calls = _bundle(address(usdc), USDC_AMOUNT, makerParams);
@@ -129,7 +135,7 @@ contract PrivateTradeShedTest is PrivateTradeTestBase {
 
   /// @dev The same nonce cannot be used twice.
   function test_bundleNonceCannotBeReplayed() public {
-    PrivateTradeTerms memory terms = _termsFor(aliceShed, bobShed, bobShed);
+    PrivateTradeTerms memory terms = _termsFull(aliceShed, bobShed, bobShed, aliceEoa, bobEoa);
     IConditionalOrder.ConditionalOrderParams memory makerParams = _params(PrivateTradeRole.Maker, terms, "maker");
 
     usdc.mint(aliceShed, USDC_AMOUNT);

@@ -52,9 +52,9 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
     assertEq(magic, ICowWrapper.wrappedSettle.selector, "wrapper did not return its selector");
 
     assertEq(usdc.balanceOf(address(alice)), 0, "alice still holds USDC");
-    assertEq(wbtc.balanceOf(address(alice)), WBTC_AMOUNT, "alice did not receive WBTC");
+    assertEq(wbtc.balanceOf(aliceOwner), WBTC_AMOUNT, "alice did not receive WBTC");
     assertEq(wbtc.balanceOf(address(bob)), 0, "bob still holds WBTC");
-    assertEq(usdc.balanceOf(address(bob)), USDC_AMOUNT, "bob did not receive USDC");
+    assertEq(usdc.balanceOf(bobOwner), USDC_AMOUNT, "bob did not receive USDC");
 
     assertEq(usdc.balanceOf(address(settlement)), 0, "settlement kept USDC");
     assertEq(wbtc.balanceOf(address(settlement)), 0, "settlement kept WBTC");
@@ -77,7 +77,7 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
 
     _settle(terms, makerParams, takerParams);
 
-    assertEq(wbtc.balanceOf(address(alice)), WBTC_AMOUNT);
+    assertEq(wbtc.balanceOf(aliceOwner), WBTC_AMOUNT);
     assertEq(usdc.balanceOf(address(carol)), USDC_AMOUNT);
   }
 

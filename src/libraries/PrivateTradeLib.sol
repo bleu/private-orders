@@ -40,7 +40,8 @@ library PrivateTradeLib {
     return GPv2Order.Data({
       sellToken: IERC20(offer.sellToken),
       buyToken: IERC20(offer.buyToken),
-      receiver: address(0),
+      // The Shed owns the order; the party receives the proceeds.
+      receiver: terms.makerBeneficiary,
       sellAmount: offer.sellAmount,
       buyAmount: offer.buyAmount,
       validTo: offer.validTo,
@@ -59,7 +60,7 @@ library PrivateTradeLib {
     return GPv2Order.Data({
       sellToken: IERC20(offer.buyToken),
       buyToken: IERC20(offer.sellToken),
-      receiver: address(0),
+      receiver: terms.takerBeneficiary,
       sellAmount: offer.buyAmount,
       buyAmount: offer.sellAmount,
       validTo: offer.validTo,

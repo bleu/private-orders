@@ -29,8 +29,8 @@ contract PrivateTradeDriverFormatTest is PrivateTradeTestBase {
     vm.prank(solver);
     wrapper.wrappedSettle(withAuctionId, _chainedWrapperData(terms));
 
-    assertEq(wbtc.balanceOf(address(alice)), WBTC_AMOUNT, "alice did not receive WBTC");
-    assertEq(usdc.balanceOf(address(bob)), USDC_AMOUNT, "bob did not receive USDC");
+    assertEq(wbtc.balanceOf(aliceOwner), WBTC_AMOUNT, "alice did not receive WBTC");
+    assertEq(usdc.balanceOf(bobOwner), USDC_AMOUNT, "bob did not receive USDC");
   }
 
   /// @dev The appData document matches the shape `crates/app-data` parses: `metadata.wrappers[]`

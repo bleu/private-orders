@@ -34,6 +34,7 @@ import {PrivateTradeBuilder} from "../../src/libraries/PrivateTradeBuilder.sol";
 import {PrivateTradeSubmission} from "../../src/libraries/PrivateTradeSubmission.sol";
 import {PrivateTradeProposal} from "../../src/libraries/PrivateTradeProposal.sol";
 import {ShedBundle} from "../../src/libraries/ShedBundle.sol";
+
 import {PrivateTradeSubmitter} from "../../src/PrivateTradeSubmitter.sol";
 
 /// @dev The Shed implementation states its own EIP-712 domain version, and the deployed version
@@ -225,9 +226,13 @@ abstract contract PrivateTradeE2EBase is Test {
     assertTrue(cow.singleOrders(bobShed, cow.hash(_takerParams(signed.terms))), "taker order not authorised");
 
     assertEq(IERC20(USDC).balanceOf(aliceShed), 0, "alice shed still holds USDC");
-    assertEq(IERC20(DAI).balanceOf(aliceShed), DAI_AMOUNT, "alice shed did not receive DAI");
     assertEq(IERC20(DAI).balanceOf(bobShed), 0, "bob shed still holds DAI");
-    assertEq(IERC20(USDC).balanceOf(bobShed), USDC_AMOUNT, "bob shed did not receive USDC");
+
+    // The proceeds belong to the people. The Sheds sold, and hold nothing afterwards.
+    assertEq(IERC20(DAI).balanceOf(aliceEoa), DAI_AMOUNT, "alice's wallet did not receive DAI");
+    assertEq(IERC20(USDC).balanceOf(bobEoa), USDC_AMOUNT, "bob's wallet did not receive USDC");
+    assertEq(IERC20(DAI).balanceOf(aliceShed), 0, "alice shed received the proceeds");
+    assertEq(IERC20(USDC).balanceOf(bobShed), 0, "bob shed received the proceeds");
     assertEq(IERC20(USDC).balanceOf(SETTLEMENT), settlementUsdcBefore, "settlement retained USDC");
     assertEq(IERC20(DAI).balanceOf(SETTLEMENT), settlementDaiBefore, "settlement retained DAI");
   }
@@ -246,8 +251,10 @@ abstract contract PrivateTradeE2EBase is Test {
     vm.expectRevert(bytes("GPv2: order filled"));
     submitter.submitPrepared(_submitterContext(), signed.terms);
 
-    assertEq(IERC20(DAI).balanceOf(aliceShed), DAI_AMOUNT, "alice shed did not receive DAI");
-    assertEq(IERC20(USDC).balanceOf(bobShed), USDC_AMOUNT, "bob shed did not receive USDC");
+    assertEq(IERC20(DAI).balanceOf(aliceEoa), DAI_AMOUNT, "alice's wallet did not receive DAI");
+    assertEq(IERC20(USDC).balanceOf(bobEoa), USDC_AMOUNT, "bob's wallet did not receive USDC");
+    assertEq(IERC20(DAI).balanceOf(aliceShed), 0, "alice shed received the proceeds");
+    assertEq(IERC20(USDC).balanceOf(bobShed), 0, "bob shed received the proceeds");
   }
 
   /// @dev The full BYOS path: a sub-solver that holds no allowlist entry relays the parties'
@@ -282,8 +289,10 @@ abstract contract PrivateTradeE2EBase is Test {
 
     submitter.submitPrepared(context, signed.terms);
 
-    assertEq(IERC20(DAI).balanceOf(aliceShed), DAI_AMOUNT, "alice shed did not receive DAI");
-    assertEq(IERC20(USDC).balanceOf(bobShed), USDC_AMOUNT, "bob shed did not receive USDC");
+    assertEq(IERC20(DAI).balanceOf(aliceEoa), DAI_AMOUNT, "alice's wallet did not receive DAI");
+    assertEq(IERC20(USDC).balanceOf(bobEoa), USDC_AMOUNT, "bob's wallet did not receive USDC");
+    assertEq(IERC20(DAI).balanceOf(aliceShed), 0, "alice shed received the proceeds");
+    assertEq(IERC20(USDC).balanceOf(bobShed), 0, "bob shed received the proceeds");
   }
 
   function _makerParams(PrivateTradeTerms memory terms)
@@ -316,7 +325,10 @@ abstract contract PrivateTradeE2EBase is Test {
         validTo: uint32(block.timestamp + 1 days),
         salt: keccak256(abi.encode("e2e-private-trade", maker, taker))
       }),
-      taker: taker
+      taker: taker,
+      // The parties' own wallets: proceeds go to the people, not to the Sheds that hold the orders.
+      makerBeneficiary: aliceEoa,
+      takerBeneficiary: bobEoa
     });
   }
 

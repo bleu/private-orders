@@ -38,6 +38,19 @@ struct PrivateOffer {
 struct PrivateTradeTerms {
   PrivateOffer offer;
   address taker;
+  /// @dev Where each side's proceeds go. The Shed owns the order, so without this the tokens the
+  /// trade pays out arrive in the Shed — a contract the party then has to move them out of. Naming
+  /// the party's own wallet means they arrive where the party expects.
+  ///
+  /// These are declared rather than read from the Shed while building the order, because orders are
+  /// built before the Sheds exist, and because a Shed's admin is not readable from outside it: the
+  /// proxy answers `admin()` only when the caller is the proxy itself, so the implementation can read
+  /// it and nobody else can. The service always sets each side's beneficiary to that side's own
+  /// wallet, and the page shows the address before anything is signed. Enforcing it on-chain is
+  /// possible but not free: a bundle may delegatecall a helper, and inside a delegatecall the Shed
+  /// *can* read its own admin.
+  address makerBeneficiary;
+  address takerBeneficiary;
 }
 
 /// @dev Raised when the wrapper's declared `offerId` does not match the offer it carries.

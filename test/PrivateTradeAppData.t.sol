@@ -47,8 +47,8 @@ contract PrivateTradeAppDataTest is PrivateTradeTestBase {
     vm.prank(solver);
     wrapper.wrappedSettle(_settleDataWith(_tokens(), _clearingPrices(), trades, _emptyInteractions()), chained);
 
-    assertEq(wbtc.balanceOf(address(alice)), WBTC_AMOUNT, "alice did not receive WBTC");
-    assertEq(usdc.balanceOf(address(bob)), USDC_AMOUNT, "bob did not receive USDC");
+    assertEq(wbtc.balanceOf(aliceOwner), WBTC_AMOUNT, "alice did not receive WBTC");
+    assertEq(usdc.balanceOf(bobOwner), USDC_AMOUNT, "bob did not receive USDC");
     assertEq(usdc.balanceOf(address(settlement)), 0, "settlement kept USDC");
   }
 
