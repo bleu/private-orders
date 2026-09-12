@@ -123,6 +123,18 @@ Three things worth stating:
   a tradeless settlement. A private trade cannot be: both orders are fill-or-kill and the settlement
   marks them filled, so a replay already reverts with `GPv2: order filled`.
 
+## The app
+
+Two pages, and the whole flow between them:
+
+```bash
+./scripts/app-e2e.sh     # drives both pages in a real browser and checks the result
+```
+
+One page to offer a trade — describe it, get a link, sign, share. One page to accept it — open the
+link, sign, settle, read the receipt. Neither party sends a transaction, and the proceeds arrive in
+their own wallets.
+
 ## The link service
 
 Turns an agreed trade into a shareable link and drives it to settlement:

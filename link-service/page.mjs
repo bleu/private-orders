@@ -18,12 +18,8 @@
 // the reader wants, and a wallet that only announces itself is invisible to a page that reads
 // `window.ethereum` alone.
 
-export const render = (id) => `<!doctype html>
-<html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Private trade</title>
-<style>
+/// Both pages share one stylesheet.
+const CSS = `
   :root{--ink:#111;--muted:#666;--line:#e7e7e7;--bg:#fff;--accent:#0b6cff;--ok:#1b7f4b;--warn:#b25b00}
   @media (prefers-color-scheme:dark){:root{--ink:#f2f2f2;--muted:#9a9a9a;--line:#2a2a2a;--bg:#111}}
   *{box-sizing:border-box}
@@ -59,13 +55,53 @@ export const render = (id) => `<!doctype html>
   .bar{height:4px;border-radius:2px;background:var(--line);overflow:hidden;margin-top:1rem}
   .bar>i{display:block;height:100%;width:35%;background:var(--accent);animation:slide 1.4s ease-in-out infinite}
   @keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}
-</style>
+`;
+
+/// A wallet that asks the service to sign with a key it was given, so the flow can be driven in a
+/// browser without an extension. Off unless the service was started with development keys, and it
+/// will only sign for the addresses it holds.
+const devWalletShim = (enabled) => (enabled ? `
+<script>
+(function () {
+  const account = new URLSearchParams(location.search).get('devwallet');
+  if (!account) return;
+  const sign = async (body) => {
+    const res = await fetch('/dev/sign', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const out = await res.json();
+    if (!res.ok) throw new Error(out.error || 'the development wallet could not sign');
+    return out.signature;
+  };
+  const provider = {
+    isDevWallet: true,
+    on() {},
+    request: async ({ method, params }) => {
+      if (method === 'eth_requestAccounts' || method === 'eth_accounts') return [account];
+      if (method === 'eth_chainId') return '0x1';
+      if (method === 'eth_signTypedData_v4') return sign({ address: account, typedData: JSON.parse(params[1]) });
+      if (method === 'personal_sign') return sign({ address: account, message: params[0] });
+      throw new Error('the development wallet does not implement ' + method);
+    },
+  };
+  const announce = () => window.dispatchEvent(new CustomEvent('eip6963:announceProvider', {
+    detail: { info: { uuid: 'dev-wallet', name: 'Development wallet' }, provider },
+  }));
+  window.addEventListener('eip6963:requestProvider', announce);
+  window.__devWallet = provider;
+})();
+</script>` : '');
+
+export const render = (id, options = {}) => `<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Private trade</title>
+<style>${CSS}</style>
 
 <h1>Private trade</h1>
 <p class="sub"><span id="status" class="pill">loading</span> <span class="pill ok">you pay no gas</span></p>
 
 <div id="app"></div>
-
+${devWalletShim(options.devWallet)}
 <script>
 const id = ${JSON.stringify(id)};
 
@@ -254,7 +290,7 @@ function render() {
   }
 
   if (me.role === 'taker' && !me.makerSigned) {
-    app.append(frag('<div class="note warn">Waiting for the other party to sign. The link is ready — ' +
+    app.append(frag('<div class="note">Waiting for the other party to sign. The link is ready — ' +
       'nothing happens until they do.</div>'));
   }
 
@@ -274,8 +310,9 @@ function render() {
       app.append(frag('<div class="note">Your Shed is empty — everything is in your wallet.</div>'));
     } else {
       const what = held.map((h) => amount(h.amount, h.decimals) + ' ' + h.symbol).join(' and ');
-      app.append(frag('<div class="note">' + what + ' is in your Shed, a contract only you control. ' +
-        'One signature moves it to your wallet, and you still pay no gas.</div>'));
+      app.append(frag('<div class="note">' + what + ' ' + (held.length > 1 ? 'are' : 'is') +
+        ' sitting in your Shed, a contract only you control. One signature moves ' +
+        (held.length > 1 ? 'them' : 'it') + ' to your wallet, and you still pay no gas.</div>'));
       const move = node('<button>Move ' + what + ' to my wallet</button>');
       move.onclick = async () => {
         move.disabled = true;
@@ -408,8 +445,12 @@ function render() {
   };
   app.append(go);
 
-  if (me.role === 'maker') {
-    const share = window.location.href;
+  // Only once the signature is in: handing out a link for an offer nobody has signed is how a
+  // failed signature looks like a successful one.
+  if (me.role === 'maker' && me.signed) {
+    // The canonical offer URL, without whatever this session carried in its query string: a link
+    // that says which wallet *I* am must not be the link I hand to the other party.
+    const share = location.origin + '/o/' + id;
     app.append(frag('<div class="step"><b>Send this to the other party</b>' +
       '<div class="link"><input readonly value="' + share + '">' +
       '<button class="ghost" style="width:auto">Copy</button></div></div>'));
@@ -466,13 +507,159 @@ function signTyped(typedData) {
 }
 
 function poll() {
+  // One failed request used to end the loop silently, which is indistinguishable from a trade that
+  // never settles. Keep polling, and say so if it keeps failing.
+  let failures = 0;
   const timer = setInterval(async () => {
-    const s = await get('/offers/' + id + '/status');
-    document.getElementById('status').textContent = s.status;
-    if (s.status === 'settled') { clearInterval(timer); load(); }
+    try {
+      const s = await get('/offers/' + id + '/status');
+      failures = 0;
+      document.getElementById('status').textContent = s.status;
+      if (s.status === 'settled') {
+        clearInterval(timer);
+        await load();
+        return;
+      }
+      const note = document.getElementById('waiting');
+      if (note) note.textContent = 'Waiting for a solver to settle this. Usually under a minute.';
+    } catch (err) {
+      failures += 1;
+      const note = document.getElementById('waiting');
+      if (note && failures > 2) note.textContent = 'Still checking… (' + (err.message || err) + ')';
+    }
   }, 3000);
 }
 
 load();
+</script>
+</html>`;
+
+
+/// The maker's page: describe the trade, get a link, sign, share.
+export const renderCreate = ({ devWallet, defaults }) => `<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Offer a private trade</title>
+<style>${CSS}
+  label{display:block;font-size:.85rem;color:var(--muted);margin:.9rem 0 .3rem}
+  input{width:100%;font:inherit;padding:.6rem .7rem;border:1px solid var(--line);border-radius:10px;
+        background:transparent;color:var(--ink)}
+  .two{display:flex;gap:.6rem}
+  .two>*{flex:1}
+</style>
+
+<h1>Offer a private trade</h1>
+<p class="sub"><span class="pill ok">you pay no gas</span></p>
+<p class="sub" style="margin-top:.6rem">Describe what you will give and what you want back. The other
+party opens a link, signs, and the two sides settle together or not at all — no order book, no
+auction, and neither of you sends a transaction.</p>
+
+<div id="app"></div>
+${devWalletShim(devWallet)}
+
+<script>
+const DEFAULTS = ${JSON.stringify(defaults ?? {})};
+const el = (h) => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content; };
+const node = (h) => el(h).firstElementChild;
+const get = async (p) => (await fetch(p)).json();
+const post = async (p, body) => {
+  const res = await fetch(p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const out = await res.json();
+  if (!res.ok) throw new Error(out.error || res.statusText);
+  return out;
+};
+const short = (a) => a.slice(0, 6) + '…' + a.slice(-4);
+
+let account = null, walletName = null, provider = null, failure = null, discovered = [];
+
+window.addEventListener('eip6963:announceProvider', (event) => {
+  if (!discovered.some((d) => d.info.uuid === event.detail.info.uuid)) { discovered.push(event.detail); render(); }
+});
+window.dispatchEvent(new Event('eip6963:requestProvider'));
+
+function wallets() {
+  if (discovered.length) return discovered.map((d) => ({ name: d.info.name, provider: d.provider }));
+  return window.ethereum ? [{ name: 'Browser wallet', provider: window.ethereum }] : [];
+}
+
+async function connect(wallet) {
+  try {
+    failure = null;
+    const [first] = await wallet.provider.request({ method: 'eth_requestAccounts' });
+    if (!first) throw new Error('the wallet returned no accounts');
+    provider = wallet.provider;
+    walletName = wallet.name;
+    account = first;
+    render();
+  } catch (err) {
+    failure = err.message || String(err);
+    render();
+  }
+}
+
+function field(label, id, value, placeholder) {
+  return el('<label>' + label + '<input id="' + id + '" value="' + (value || '') + '" placeholder="' + (placeholder || '') + '"></label>');
+}
+
+function render() {
+  const app = document.getElementById('app');
+  app.replaceChildren();
+
+  if (failure) app.append(el('<div class="note warn">' + failure + '</div>'));
+
+  if (!account) {
+    app.append(el('<div class="step"><b>Connect the wallet that will hold your side.</b>' +
+      '<p class="sub" style="margin:.4rem 0 0">It becomes the maker: your tokens go in, theirs come back, ' +
+      'and the link binds to the counterparty you name.</p></div>'));
+    const found = wallets();
+    for (const wallet of found) {
+      const b = node('<button>Connect ' + wallet.name + '</button>');
+      b.onclick = () => connect(wallet);
+      app.append(b);
+    }
+    if (!found.length) app.append(el('<div class="note warn">No wallet detected on this page.</div>'));
+    return;
+  }
+
+  app.append(el('<div class="note">Connected as <span class="addr">' + short(account) + '</span>' +
+    (walletName ? ' with ' + walletName : '') + '</div>'));
+
+  app.append(field('You give (token address)', 'sellToken', DEFAULTS.sellToken));
+  app.append(field('amount, in the smallest unit', 'sellAmount', '100000000'));
+  app.append(field('You want (token address)', 'buyToken', DEFAULTS.buyToken));
+  app.append(field('amount, in the smallest unit', 'buyAmount', '100000000000000000000'));
+  app.append(field('The wallet you are trading with', 'taker', ''));
+  app.append(field('Offer expires in (hours)', 'hours', '24'));
+
+  const go = node('<button>Create the link</button>');
+  go.onclick = async () => {
+    go.disabled = true;
+    go.textContent = 'Creating…';
+    try {
+      failure = null;
+      const value = (id) => document.getElementById(id).value.trim();
+      const offer = await post('/offers', {
+        maker: account,
+        taker: value('taker'),
+        sellToken: value('sellToken'),
+        sellAmount: value('sellAmount'),
+        buyToken: value('buyToken'),
+        buyAmount: value('buyAmount'),
+        validFor: String(Number(value('hours') || 24) * 3600),
+      });
+      // Keep the query string: it carries which wallet this page is acting as.
+      location.href = '/o/' + offer.id + location.search;
+    } catch (err) {
+      failure = err.message || String(err);
+      go.disabled = false;
+      go.textContent = 'Create the link';
+      render();
+    }
+  };
+  app.append(go);
+}
+
+render();
 </script>
 </html>`;

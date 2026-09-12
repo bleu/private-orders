@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 
-import { render } from './page.mjs';
+import { render, renderCreate } from './page.mjs';
 
 const PORT = Number(process.env.PORT ?? 9200);
 const ROOT = process.env.PRIVATE_TRADE_ROOT ?? path.resolve(import.meta.dirname, '..');
@@ -52,7 +52,26 @@ const CONFIG = {
   authoriser: process.env.PRIVATE_TRADE_AUTHORISER ?? deployed.authoriser,
   vaultRelayer: process.env.VAULT_RELAYER_ADDRESS,
   relayerKey: process.env.RELAYER_PRIVATE_KEY,
+  // Pre-filled on the create page, so the whole flow is a few clicks on a known stack.
+  defaults: {
+    sellToken: process.env.DEFAULT_SELL_TOKEN ?? '',
+    buyToken: process.env.DEFAULT_BUY_TOKEN ?? '',
+  },
 };
+
+// A development wallet: the page can ask this service to sign with a key it was given, which is what
+// lets the whole flow be driven in a browser without a wallet extension. Enabled only when keys are
+// configured, and it will only sign for the addresses it was handed.
+const DEV_KEYS = new Map(
+  (process.env.PRIVATE_TRADE_DEV_KEYS ?? '')
+    .split(',')
+    .filter(Boolean)
+    .map((pair) => {
+      const [address, key] = pair.split('=');
+      return [address.trim().toLowerCase(), key.trim()];
+    }),
+);
+const DEV_WALLET = DEV_KEYS.size > 0;
 
 fs.mkdirSync(STORE, { recursive: true });
 fs.mkdirSync(OFFERS_DIR, { recursive: true });
@@ -181,6 +200,17 @@ function probes() {
       },
     },
   ];
+}
+
+/// Sign as a development key. Typed data goes through the same EIP-712 hashing a wallet would do;
+/// a plain message is prefixed exactly as `personal_sign` prefixes it.
+function devSign(key, { typedData, message }) {
+  if (typedData) {
+    const file = path.join(ROOT, 'out-json', 'dev-typed-data.json');
+    fs.writeFileSync(file, JSON.stringify(typedData));
+    return cast(['wallet', 'sign', '--data', '--from-file', file, '--private-key', key]).trim();
+  }
+  return cast(['wallet', 'sign', '--private-key', key, String(message)]).trim();
 }
 
 /// Which side of a trade an address is, or null. Kept in one place so the role view and the
@@ -410,6 +440,13 @@ const server = http.createServer(async (req, res) => {
     const parts = url.pathname.split('/').filter(Boolean);
 
     if (req.method === 'GET' && parts[0] === 'health') return json(res, 200, { ok: true });
+
+    if (DEV_WALLET && req.method === 'POST' && parts[0] === 'dev' && parts[1] === 'sign') {
+      const body = await readBody(req);
+      const key = DEV_KEYS.get(String(body.address ?? '').toLowerCase());
+      if (!key) return json(res, 404, { error: 'no development key for that address' });
+      return json(res, 200, { address: body.address, signature: devSign(key, body) });
+    }
 
     // Typed-data probes, simplest first. Every one of these is canonical EIP-712, so a wallet that
     // signs them all correctly and still cannot sign the bundle tells us the problem is one specific
@@ -686,6 +723,13 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    if (req.method === 'GET' && parts.length === 0) {
+      res
+        .writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+        .end(renderCreate({ devWallet: DEV_WALLET, defaults: CONFIG.defaults }));
+      return;
+    }
+
     if (req.method === 'GET' && parts[0] === 'o' && parts[1]) {
       const offer = loadOffer(parts[1]);
       if (!offer) return json(res, 404, { error: 'unknown offer' });
@@ -693,7 +737,7 @@ const server = http.createServer(async (req, res) => {
       // like a bug in the page.
       res
         .writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-        .end(render(offer.id));
+        .end(render(offer.id, { devWallet: DEV_WALLET }));
       return;
     }
 
