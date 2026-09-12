@@ -157,9 +157,8 @@ const until = (iso) => {
 
 async function load() {
   offer = await get('/offers/' + id);
-  if (offer.status !== 'settled') {
-    offer = { ...offer, ...(await get('/offers/' + id + '/status')) };
-  }
+  // Always merge the status: the settlement transaction exists only once it is settled.
+  offer = { ...offer, ...(await get('/offers/' + id + '/status')) };
   document.getElementById('status').textContent = offer.status;
   document.getElementById('status').className = 'pill' + (offer.status === 'settled' ? ' ok' : '');
   render();
@@ -186,12 +185,17 @@ function terms() {
   const mine = me && me.role;
   const pay = mine === 'taker' ? [t.buyAmount, t.buyDecimals, t.buySymbol] : [t.sellAmount, t.sellDecimals, t.sellSymbol];
   const get_ = mine === 'taker' ? [t.sellAmount, t.sellDecimals, t.sellSymbol] : [t.buyAmount, t.buyDecimals, t.buySymbol];
-  const [payLabel, getLabel] = mine ? ['You pay', 'You receive'] : ['One side gives', 'The other gives'];
+  const settled = offer.status === 'settled';
+  const [payLabel, getLabel] = settled
+    ? ['You paid', 'You received']
+    : mine
+      ? ['You pay', 'You receive']
+      : ['One side gives', 'The other gives'];
   return frag(\`
     <div class="trade">
       <div class="row"><span>\${payLabel}</span><span class="amt">\${amount(pay[0], pay[1])} \${pay[2]}</span></div>
       <div class="row"><span>\${getLabel}</span><span class="amt">\${amount(get_[0], get_[1])} \${get_[2]}</span></div>
-      <div class="row"><small>Expires</small><small>\${until(t.expiresAt)}</small></div>
+      \${settled ? '' : '<div class="row"><small>Expires</small><small>' + until(t.expiresAt) + '</small></div>'}
     </div>\`);
 }
 
@@ -243,6 +247,17 @@ function render() {
 
   app.append(frag('<h2>Counterparty</h2><div class="trade"><div class="row">' +
     '<span class="addr">' + me.counterparty + '</span></div></div>'));
+
+  if (offer.status === 'settled') {
+    app.append(frag('<h2>Receipt</h2><div class="trade">' +
+      '<div class="row"><span>Settlement</span><span class="addr">' +
+      (offer.settlementTx ? offer.settlementTx : 'recorded, transaction not found') + '</span></div>' +
+      '<div class="row"><small>Order</small><small class="addr">' + short(offer.orderUid ?? '') + '</small></div>' +
+      '</div>'));
+    app.append(frag('<div class="note ok">What you received is in your Shed, not your wallet. ' +
+      'Moving it out takes one more signed bundle, and there is no button for that yet.</div>'));
+    return;
+  }
 
   const funded = BigInt(me.balance) >= BigInt(me.permit.amount);
 
