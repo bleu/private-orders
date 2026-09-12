@@ -32,9 +32,80 @@ contract Diagnose is Script {
   uint256[15] internal chains =
     [uint256(1), 5, 10, 56, 100, 137, 324, 8453, 42161, 43114, 59144, 534352, 11155111, 17000, 31337];
 
-  function run() external view {
+  function run() external {
     // Mode 2: recover the signer of a plain `personal_sign` message, which answers the one question
     // the typed-data candidates cannot: is the wallet signing with the key it claims?
+    // Mode 3: sweep the simplest possible typed message against a signature the wallet produced
+    // for it. Nothing about our payload can differ, so a match here names the wallet's rule.
+    if (vm.envExists("DIAG_PROBE_FILE")) {
+      string memory f = vm.readFile(vm.envString("DIAG_PROBE_FILE"));
+      bytes memory sig = vm.parseJsonBytes(f, ".signature");
+      address expected = vm.parseJsonAddress(f, ".address");
+      bytes32 structHash = keccak256(abi.encode(keccak256("Probe(uint256 value)"), uint256(42)));
+      address probeContract = 0x0000000000000000000000000000000000000001;
+
+      console.log("expected", expected);
+      _try(
+        "canonical, chainId 1",
+        _wrap(_domain(probeContract, "PrivateTradeProbe", "1", 1), structHash),
+        sig,
+        expected
+      );
+      _try(
+        "no 1901 prefix",
+        keccak256(abi.encodePacked(_domain(probeContract, "PrivateTradeProbe", "1", 1), structHash)),
+        sig,
+        expected
+      );
+      _try("struct hash alone", structHash, sig, expected);
+      _try(
+        "eip191 over canonical",
+        _eip191(_wrap(_domain(probeContract, "PrivateTradeProbe", "1", 1), structHash)),
+        sig,
+        expected
+      );
+
+      uint256[] memory sweep = new uint256[](32);
+      uint256[32] memory list = [
+        uint256(0), 1, 3, 4, 5, 10, 25, 56, 97, 100, 137, 250, 324, 336, 420, 480,
+        1088, 1284, 1337, 5000, 8453, 17000, 31337, 42161, 42220, 43114, 59144, 80002, 84532, 11155111, 534352, 81457
+      ];
+      for (uint256 i = 0; i < list.length; ++i) {
+        sweep[i] = list[i];
+        _try(
+          string.concat("chainId ", Strings.toString(list[i])),
+          _wrap(_domain(probeContract, "PrivateTradeProbe", "1", list[i]), structHash),
+          sig,
+          expected
+        );
+      }
+      _try(
+        "version ''",
+        _wrap(_domain(probeContract, "PrivateTradeProbe", "", 1), structHash),
+        sig,
+        expected
+      );
+
+      // Every ordering of the domain's four fields in the type string, against the submitted
+      // signature and then against a known-correct one. The second run validates the sweep: if order
+      // 0123 does not match there, the sweep is wrong, not the wallet.
+      bytes memory good = vm.envExists("DIAG_GOOD_SIG")
+        ? vm.parseJsonBytes(vm.readFile(vm.envString("DIAG_GOOD_SIG")), ".signature")
+        : bytes("");
+      _sweep("submitted", sig, expected, structHash, probeContract);
+      if (good.length == 65) _sweep("reference", good, expected, structHash, probeContract);
+
+      // If a wallet was handed the typed data as a *string* and signed it as a message, it hashed
+      // the JSON text rather than the struct.
+      if (vm.envExists("DIAG_JSON_STRING")) {
+        string memory json = vm.readFile(vm.envString("DIAG_JSON_STRING"));
+        _try("eip191 over the json text", _eip191String(json), sig, expected);
+        _try("keccak of the json text", keccak256(bytes(json)), sig, expected);
+        _try("eip191 over the json text, no trailing newline", _eip191String(_trim(json)), sig, expected);
+      }
+      return;
+    }
+
     if (vm.envExists("DIAG_MESSAGE")) {
       string memory message = vm.envString("DIAG_MESSAGE");
       bytes memory sig = vm.parseJsonBytes(vm.readFile(vm.envString("DIAG_SIG_FILE")), ".signature");
@@ -169,6 +240,76 @@ contract Diagnose is Script {
 
   function _wrap(bytes32 separator, bytes32 structHash) private pure returns (bytes32) {
     return keccak256(abi.encodePacked(hex"1901", separator, structHash));
+  }
+
+  /// @dev The twenty-four orderings of the domain's four fields. Values are held as typed words
+  /// rather than strings to re-parse: an earlier version called parseUint on a name and reverted
+  /// after two orders, which looked exactly like "no ordering matches".
+  function _sweep(string memory label, bytes memory sig, address expected, bytes32 structHash, address probeContract)
+    private
+    view
+  {
+    for (uint256 a = 0; a < 4; ++a) {
+      for (uint256 b = 0; b < 4; ++b) {
+        for (uint256 c = 0; c < 4; ++c) {
+          for (uint256 d = 0; d < 4; ++d) {
+            if (a == b || a == c || a == d || b == c || b == d || c == d) continue;
+            uint256[4] memory order = [a, b, c, d];
+            _try(
+              string.concat(
+                label,
+                " order ",
+                Strings.toString(a),
+                Strings.toString(b),
+                Strings.toString(c),
+                Strings.toString(d)
+              ),
+              _wrap(_orderedSeparator(order, "PrivateTradeProbe", "1", 1, probeContract), structHash),
+              sig,
+              expected
+            );
+          }
+        }
+      }
+    }
+  }
+
+  /// @dev The domain separator a wallet gets if it orders the four fields as `order` says.
+  function _orderedSeparator(
+    uint256[4] memory order,
+    string memory name,
+    string memory version,
+    uint256 chainId,
+    address verifying
+  ) private pure returns (bytes32) {
+    string[4] memory names = ["string name", "string version", "uint256 chainId", "address verifyingContract"];
+    bytes memory typeString = "EIP712Domain(";
+    for (uint256 i = 0; i < 4; ++i) {
+      if (i > 0) typeString = abi.encodePacked(typeString, ",");
+      typeString = abi.encodePacked(typeString, names[order[i]]);
+    }
+    typeString = abi.encodePacked(typeString, ")");
+
+    bytes32[4] memory values;
+    values[0] = keccak256(bytes(name));
+    values[1] = keccak256(bytes(version));
+    values[2] = bytes32(chainId);
+    values[3] = bytes32(uint256(uint160(verifying)));
+
+    return keccak256(
+      abi.encode(
+        keccak256(typeString), values[order[0]], values[order[1]], values[order[2]], values[order[3]]
+      )
+    );
+  }
+
+  function _trim(string memory input) private pure returns (string memory) {
+    bytes memory b = bytes(input);
+    uint256 end = b.length;
+    while (end > 0 && (b[end - 1] == "\n" || b[end - 1] == " " || b[end - 1] == "\r")) end--;
+    bytes memory out = new bytes(end);
+    for (uint256 i = 0; i < end; ++i) out[i] = b[i];
+    return string(out);
   }
 
   /// @dev `personal_sign` over a string payload.

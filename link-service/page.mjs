@@ -119,17 +119,6 @@ async function connect(wallet) {
     usable = wallet.provider;
     walletName = wallet.name;
     account = accounts[0];
-    // Temporary diagnostic, run once per connect: it is the only way to tell a wallet that is on a
-    // different key from one that hashed a different message.
-    try {
-      const message = 'private-trade wallet check';
-      const signature = await usable.request({ method: 'personal_sign', params: [message, account] });
-      const chainId = await usable.request({ method: 'eth_chainId' }).catch(() => null);
-      check = await post('/wallet-check', { address: account, message, signature, chainId });
-    } catch {
-      check = null;
-    }
-
     usable.on?.('accountsChanged', (list) => { account = list[0] ?? null; me = null; loadRole(); });
     usable.on?.('chainChanged', () => loadRole());
     await loadRole();
@@ -290,6 +279,21 @@ function render() {
   app.append(frag('<div class="step' + (bundleSig ? ' done' : '') + '"><span class="n">2</span><b>Authorise the trade</b>' +
     '<p class="sub" style="margin:.4rem 0 0">Creates the order for exactly this pair, at exactly these amounts. ' +
     'Nothing else can fill it.</p></div>'));
+  if (!check) {
+    const checkBtn = node('<button class="ghost">Check the wallet signs with the connected account</button>');
+    checkBtn.onclick = async () => {
+      checkBtn.disabled = true;
+      checkBtn.textContent = 'Check your wallet…';
+      try {
+        await runMessageCheck();
+      } catch (err) {
+        failure = describe(err);
+      }
+      render();
+    };
+    app.append(checkBtn);
+  }
+
   app.append(frag('<div class="note">Your wallet holds ' + amount(me.balance, me.permit.decimals) + ' ' +
     me.permit.symbol + (funded ? ' <span class="ok">— enough</span>'
       : ' <span class="warn">— you need ' + amount(me.permit.amount, me.permit.decimals) + '</span>') + '</div>'));
@@ -383,7 +387,19 @@ function probeNames() {
   return probeCache;
 }
 
+/// A plain message, not typed data. It separates "the wallet signs with the key it claims" from
+/// "the wallet hashed a different message" — the probe results only mean something once this is
+/// known. Asked for deliberately, never on connect.
+async function runMessageCheck() {
+  const message = 'private-trade wallet check';
+  const signature = await usable.request({ method: 'personal_sign', params: [message, account] });
+  const chainId = await usable.request({ method: 'eth_chainId' }).catch(() => null);
+  check = await post('/wallet-check', { address: account, message, signature, chainId });
+}
+
 function signTyped(typedData) {
+  // A JSON *string*. Rabby rejects the object form with -32602 "data is not a valid JSON string",
+  // so this is not a stylistic choice: it is what this wallet requires.
   return usable.request({ method: 'eth_signTypedData_v4', params: [account, JSON.stringify(typedData)] });
 }
 
