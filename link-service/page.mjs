@@ -275,7 +275,10 @@ function render() {
       go.textContent = 'One more signature…';
       bundleSig = await signTyped(me.bundle.typedData);
       go.textContent = 'Submitting…';
-      const body = { signature: bundleSig, permitSignature: permitSig };
+      // The wallet's own account list travels with the signatures: a mismatch is almost always a
+      // wallet signing with an account other than the one it reported, and the answer names it.
+      const accounts = await usable.request({ method: 'eth_accounts' }).catch(() => null);
+      const body = { signature: bundleSig, permitSignature: permitSig, accounts };
       if (me.role === 'maker') await post('/offers/' + id + '/signature', { role: 'maker', ...body });
       else await post('/offers/' + id + '/accept', body);
       await load();

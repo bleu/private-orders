@@ -21,7 +21,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 
 import { render } from './page.mjs';
 
@@ -34,9 +34,19 @@ const STORE = path.join(ROOT, 'out-json', 'link');
 const OFFERS_DIR = process.env.SUBSOLVER_OFFERS_DIR ?? path.join(ROOT, 'out-json', 'sub-solver-offers');
 const PUBLIC_URL = process.env.PUBLIC_URL ?? `http://localhost:${PORT}`;
 
+// The deploy script writes the addresses it deployed. Reading them as a fallback means the service
+// starts correctly by hand, not only when a script exports the environment first.
+const deployed = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(ROOT, 'out-json', 'private-trade-deployed.json'), 'utf8'));
+  } catch {
+    return {};
+  }
+})();
+
 const CONFIG = {
-  wrapper: process.env.PRIVATE_TRADE_WRAPPER,
-  handler: process.env.PRIVATE_TRADE_HANDLER,
+  wrapper: process.env.PRIVATE_TRADE_WRAPPER ?? deployed.wrapper,
+  handler: process.env.PRIVATE_TRADE_HANDLER ?? deployed.handler,
   shedFactory: process.env.COWSHED_COMPOSABLE_COW_FACTORY_ADDRESS,
   composableCoW: process.env.COMPOSABLE_COW_ADDRESS,
   vaultRelayer: process.env.VAULT_RELAYER_ADDRESS,
@@ -120,6 +130,68 @@ function relay(computed, signatures) {
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.includes('permit applied') || line.includes('digest matches') || line.includes('relayed'));
+}
+
+/// Does this signature belong to `address` over this exact typed data?
+///
+/// Returns null when the question cannot be asked (no typed data, or a malformed signature), so the
+/// caller can tell "verified false" apart from "not checked".
+function verifies(typedData, signature, address) {
+  if (!typedData || !/^0x[0-9a-fA-F]{130}$/.test(signature ?? '')) return null;
+  const file = path.join(ROOT, 'out-json', 'verify.json');
+  fs.writeFileSync(file, JSON.stringify(typedData));
+  const res = spawnSync(
+    'cast',
+    ['wallet', 'verify', '--address', address, '--data', '--from-file', file, signature],
+    { encoding: 'utf8' },
+  );
+  return res.status === 0;
+}
+
+/// Check a party's signatures before anything is relayed.
+///
+/// The relay verifies them too, but it can only report that a signature recovered to a different
+/// address — which is true of every way of getting this wrong. Asking the question here, against the
+/// message the page showed, distinguishes "signed the other prompt" from "signed something else
+/// entirely", and the wallet's own account list is echoed back because the usual cause is a wallet
+/// signing with an account other than the one that connected.
+function preflight(offer, role, body) {
+  const side = role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
+  const owner = side.owner;
+  const problems = [];
+
+  // Some wallets answer two prompts with one signature. Nothing verifies in that case, and the
+  // symptom is otherwise identical to a wrong account.
+  if (body.permitSignature && body.permitSignature === body.signature) {
+    return {
+      error: `The ${role}'s wallet returned the same signature for both prompts. Each prompt has to be approved separately.`,
+      expectedSigner: owner,
+      walletAccounts: body.accounts ?? null,
+    };
+  }
+
+  if (side.permitKind !== 'none' && side.permitTypedData) {
+    if (verifies(side.permitTypedData, body.permitSignature, owner) === false) {
+      problems.push(
+        verifies(side.bundleTypedData, body.permitSignature, owner)
+          ? 'the permit signature is over the order authorisation, so the two prompts were answered in the wrong order'
+          : `the permit signature is not a signature of the permit this page showed, by ${owner}`,
+      );
+    }
+  }
+
+  if (verifies(side.bundleTypedData, body.signature, owner) === false) {
+    problems.push(`the order signature is not a signature of the authorisation this page showed, by ${owner}`);
+  }
+
+  if (!problems.length) return null;
+  return {
+    error: `The ${role}'s signatures do not match this trade: ${problems.join('; ')}.`,
+    expectedSigner: owner,
+    // Echoed so the reader can see which account the wallet is actually on.
+    walletAccounts: body.accounts ?? null,
+    hint: 'In the wallet, make the account above the active one — a wallet signs with whichever account is selected, not the one the page connected with.',
+  };
 }
 
 /// The first `Error: ...` line out of a failed `forge` run, without the invocation around it.
@@ -341,6 +413,9 @@ const server = http.createServer(async (req, res) => {
 
       if (req.method === 'POST' && parts[2] === 'signature') {
         const body = await readBody(req);
+        // Kept in the log because a signature that does not verify is otherwise unrecoverable:
+        // it is the only artefact that says which message the wallet actually signed.
+        console.log('signature', offer.id, body.role, JSON.stringify(body));
         if (!['maker', 'taker'].includes(body.role)) return json(res, 400, { error: 'role must be maker or taker' });
         if (!/^0x[0-9a-fA-F]{130}$/.test(body.signature ?? '')) {
           return json(res, 400, { error: 'signature must be 65 bytes, r || s || v' });
@@ -352,6 +427,9 @@ const server = http.createServer(async (req, res) => {
             permitKind: side.permitKind,
           });
         }
+        const wrong = preflight(offer, body.role, body);
+        if (wrong) return json(res, 400, wrong);
+
         offer.signatures[body.role] = body.signature;
         if (body.permitSignature) offer.permits[body.role] = body.permitSignature;
         saveOffer(offer);
@@ -360,6 +438,7 @@ const server = http.createServer(async (req, res) => {
 
       if (req.method === 'POST' && parts[2] === 'accept') {
         const body = await readBody(req);
+        console.log('accept', offer.id, JSON.stringify(body));
         if (offer.orderUid) return json(res, 409, { error: 'already accepted', orderUid: offer.orderUid });
 
         // An open offer binds to whoever accepts; a restricted one already knows its taker.
@@ -374,6 +453,10 @@ const server = http.createServer(async (req, res) => {
 
         const signature = body.signature ?? offer.signatures.taker;
         if (!signature) return json(res, 400, { error: 'signature required' });
+        // Always check what is being submitted now, not what is already on file.
+        const wrong = preflight(offer, 'taker', { ...body, signature });
+        if (wrong) return json(res, 400, wrong);
+
         offer.signatures.taker = signature;
         if (body.permitSignature) offer.permits.taker = body.permitSignature;
 
