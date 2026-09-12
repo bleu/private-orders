@@ -12,6 +12,11 @@
 // so the wallet displays the amount, the spender and the calls instead of a hex blob — the typed
 // data is produced by the same Solidity that produces the digest, and the end-to-end script proves
 // the two are the same message by signing both and comparing signatures.
+//
+// Wallets are discovered by EIP-6963 as well as `window.ethereum`. With more than one wallet
+// installed, `window.ethereum` is whichever won the injection race, which is not necessarily the one
+// the reader wants, and a wallet that only announces itself is invisible to a page that reads
+// `window.ethereum` alone.
 
 export const render = (id) => `<!doctype html>
 <html lang="en">
@@ -34,12 +39,10 @@ export const render = (id) => `<!doctype html>
   .row{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;padding:.5rem 0}
   .row+.row{border-top:1px solid var(--line)}
   .amt{font-variant-numeric:tabular-nums;font-weight:650;font-size:1.05rem}
-  .tick{color:var(--ok);font-weight:700}
   small,.muted{color:var(--muted)}
   .addr{font-family:ui-monospace,monospace;font-size:.8rem;color:var(--muted);word-break:break-all}
   button{font:inherit;font-weight:600;border:0;border-radius:10px;padding:.7rem 1rem;background:var(--accent);
-         color:#fff;width:100%;cursor:pointer}
-  button{margin-top:.8rem}
+         color:#fff;width:100%;cursor:pointer;margin-top:.8rem}
   button:disabled{background:var(--line);color:var(--muted);cursor:default}
   button.ghost{background:transparent;color:var(--accent);border:1px solid var(--line)}
   .step{border:1px solid var(--line);border-radius:12px;padding:.85rem 1rem;margin:.6rem 0}
@@ -59,15 +62,17 @@ export const render = (id) => `<!doctype html>
 </style>
 
 <h1>Private trade</h1>
-<p class="sub"><span id="status" class="pill">loading</span> <span id="gas"></span></p>
+<p class="sub"><span id="status" class="pill">loading</span> <span class="pill ok">you pay no gas</span></p>
 
 <div id="app"></div>
 
 <script>
 const id = ${JSON.stringify(id)};
-// Returns a fragment, not a single element: several callers pass more than one top-level node and
-// dropping the rest is a silent way to lose a whole section.
-const el = (h) => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content; };
+
+// A fragment, so a caller can pass several top-level nodes. Anything needing a handle on a single
+// element asks for it with node().
+const frag = (h) => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content; };
+const node = (h) => frag(h).firstElementChild;
 const get = async (p) => (await fetch(p)).json();
 const post = async (p, body) => {
   const res = await fetch(p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -76,7 +81,57 @@ const post = async (p, body) => {
   return out;
 };
 
-let offer = null, me = null, account = null, permitSig = null, bundleSig = null;
+let offer = null, me = null, account = null, usable = null, walletName = null, failure = null;
+let permitSig = null, bundleSig = null;
+
+// --- wallet discovery ---------------------------------------------------------------------------
+
+const discovered = [];
+window.addEventListener('eip6963:announceProvider', (event) => {
+  if (!discovered.some((d) => d.info.uuid === event.detail.info.uuid)) {
+    discovered.push(event.detail);
+    render();
+  }
+});
+window.dispatchEvent(new Event('eip6963:requestProvider'));
+
+function wallets() {
+  if (discovered.length) {
+    return discovered.map((d) => ({ name: d.info.name, provider: d.provider }));
+  }
+  const injected = window.ethereum;
+  if (!injected) return [];
+  const name = injected.isRabby ? 'Rabby' : injected.isMetaMask ? 'MetaMask' : 'Browser wallet';
+  return [{ name, provider: injected }];
+}
+
+async function connect(wallet) {
+  try {
+    failure = null;
+    const accounts = await wallet.provider.request({ method: 'eth_requestAccounts' });
+    if (!accounts || !accounts.length) throw new Error('the wallet returned no accounts');
+    usable = wallet.provider;
+    walletName = wallet.name;
+    account = accounts[0];
+    usable.on?.('accountsChanged', (list) => { account = list[0] ?? null; me = null; loadRole(); });
+    usable.on?.('chainChanged', () => loadRole());
+    await loadRole();
+  } catch (err) {
+    failure = describe(err);
+    render();
+  }
+}
+
+// Errors from wallets are worth showing verbatim: "user rejected" and "not connected" need
+// different responses from the reader, and swallowing either one leaves a dead button.
+function describe(err) {
+  const code = err && err.code ? ' (code ' + err.code + ')' : '';
+  const text = err && (err.message || err.reason) ? err.message || err.reason : String(err);
+  if (/rejected|denied/i.test(text)) return 'The request was declined in ' + (walletName || 'the wallet') + '.' + code;
+  return text + code;
+}
+
+// --- rendering ----------------------------------------------------------------------------------
 
 function amount(raw, decimals) {
   const s = String(raw).padStart(decimals + 1, '0');
@@ -98,23 +153,22 @@ async function load() {
   offer = await get('/offers/' + id);
   document.getElementById('status').textContent = offer.status;
   document.getElementById('status').className = 'pill' + (offer.status === 'settled' ? ' ok' : '');
-  document.getElementById('gas').innerHTML = '<span class="pill ok">you pay no gas</span>';
   render();
-  if (account) await loadRole();
+  // A wallet that is already authorised is restored without a prompt.
+  const existing = wallets()[0];
+  if (existing) {
+    try {
+      const [first] = await existing.provider.request({ method: 'eth_accounts' });
+      if (first) { usable = existing.provider; walletName = existing.name; account = first; await loadRole(); }
+    } catch { /* a wallet that refuses this is still connectable by button */ }
+  }
 }
 
 async function loadRole() {
+  if (!account) return render();
   me = await get('/offers/' + id + '/role?address=' + account);
   render();
 }
-
-function connect() {
-  if (!window.ethereum) return window.alert('No wallet found. Open this link in a wallet browser, or install one.');
-  window.ethereum.request({ method: 'eth_requestAccounts' }).then(([a]) => { account = a; loadRole(); });
-}
-
-const signTyped = (typedData) =>
-  window.ethereum.request({ method: 'eth_signTypedData_v4', params: [account, JSON.stringify(typedData)] });
 
 // The public view is written from the maker's side. Until we know who is asking, the labels stay
 // neutral; once we do, they are the reader's own.
@@ -123,9 +177,8 @@ function terms() {
   const mine = me && me.role;
   const pay = mine === 'taker' ? [t.buyAmount, t.buyDecimals, t.buySymbol] : [t.sellAmount, t.sellDecimals, t.sellSymbol];
   const get_ = mine === 'taker' ? [t.sellAmount, t.sellDecimals, t.sellSymbol] : [t.buyAmount, t.buyDecimals, t.buySymbol];
-  const label = (mine) => (mine ? ['You pay', 'You receive'] : ['One side gives', 'The other gives']);
-  const [payLabel, getLabel] = label(mine);
-  return el(\`
+  const [payLabel, getLabel] = mine ? ['You pay', 'You receive'] : ['One side gives', 'The other gives'];
+  return frag(\`
     <div class="trade">
       <div class="row"><span>\${payLabel}</span><span class="amt">\${amount(pay[0], pay[1])} \${pay[2]}</span></div>
       <div class="row"><span>\${getLabel}</span><span class="amt">\${amount(get_[0], get_[1])} \${get_[2]}</span></div>
@@ -136,99 +189,116 @@ function terms() {
 function render() {
   const app = document.getElementById('app');
   app.replaceChildren();
-
   if (!offer) return;
   app.append(terms());
+  if (failure) app.append(frag('<div class="note warn">' + failure + '</div>'));
 
   if (!account) {
-    app.append(el('<div class="step"><b>Connect the wallet this trade is with.</b>' +
-      '<p class="sub" style="margin:.4rem 0 .8rem">The terms above are public to anyone holding the link. ' +
+    const found = wallets();
+    app.append(frag('<div class="step"><b>Connect the wallet this trade is with.</b>' +
+      '<p class="sub" style="margin:.4rem 0 0">The terms above are public to anyone holding the link. ' +
       'Your side of it appears once the wallet is connected.</p></div>'));
-    const b = el('<button>Connect wallet</button>');
-    b.onclick = connect;
-    app.append(b);
+    for (const wallet of found) {
+      const b = node('<button>Connect ' + wallet.name + '</button>');
+      b.onclick = () => connect(wallet);
+      app.append(b);
+    }
+    if (!found.length) {
+      app.append(frag('<div class="note warn">No wallet detected on this page.' +
+        '<p class="sub" style="margin:.5rem 0 0">If one is installed, check that the extension can reach ' +
+        'this site — some wallets are disabled on <code>localhost</code> until allowed — or open the link ' +
+        'inside the wallet\\'s own browser.</p>' +
+        '<p class="sub" style="margin:.5rem 0 0">EIP-6963 announcements seen: ' + discovered.length + '.</p></div>'));
+    }
     return;
   }
 
+  app.append(frag('<div class="note">Connected as <span class="addr">' + short(account) + '</span>' +
+    (walletName ? ' with ' + walletName : '') + '</div>'));
+
   if (!me || !me.role) {
-    app.append(el('<div class="note">Connected as <span class="addr">' + short(account) + '</span>, ' +
-      'which is not a party to this trade. Switch accounts if that is unexpected.</div>'));
+    app.append(frag('<div class="note warn">This wallet is not a party to the trade. ' +
+      'Switch accounts in the wallet if that is unexpected.</div>'));
     return;
   }
 
   if (me.role === 'taker' && !me.makerSigned) {
-    app.append(el('<div class="note warn">Waiting for the other party to sign. The link is ready — ' +
+    app.append(frag('<div class="note warn">Waiting for the other party to sign. The link is ready — ' +
       'nothing happens until they do.</div>'));
   }
 
-  // The counterparty, once we know who is asking.
-  app.append(el('<h2>Counterparty</h2><div class="trade"><div class="row">' +
+  app.append(frag('<h2>Counterparty</h2><div class="trade"><div class="row">' +
     '<span class="addr">' + me.counterparty + '</span></div></div>'));
 
-  const side = me.role;
   const funded = BigInt(me.balance) >= BigInt(me.permit.amount);
 
-  app.append(el('<h2>Your part</h2>'));
-  app.append(el('<div class="step"><span class="n">1</span><b>Allow ' +
+  app.append(frag('<h2>Your part</h2>'));
+  app.append(frag('<div class="step' + (permitSig ? ' done' : '') + '"><span class="n">1</span><b>Allow ' +
     amount(me.permit.amount, me.permit.decimals) + ' ' + me.permit.symbol + '</b>' +
     '<p class="sub" style="margin:.4rem 0 0">Signs a permit so your own Shed can hold the tokens. ' +
     'It cannot move them anywhere else, and anyone may submit it.</p></div>'));
-
-  app.append(el('<div class="step"><span class="n">2</span><b>Authorise the trade</b>' +
+  app.append(frag('<div class="step' + (bundleSig ? ' done' : '') + '"><span class="n">2</span><b>Authorise the trade</b>' +
     '<p class="sub" style="margin:.4rem 0 0">Creates the order for exactly this pair, at exactly these amounts. ' +
     'Nothing else can fill it.</p></div>'));
-
-  app.append(el('<div class="note">Your wallet holds ' +
-    amount(me.balance, me.permit.decimals) + ' ' + me.permit.symbol +
-    (funded ? ' <span class="ok">— enough</span>' : ' <span class="warn">— you need ' +
-      amount(me.permit.amount, me.permit.decimals) + '</span>') + '</div>'));
+  app.append(frag('<div class="note">Your wallet holds ' + amount(me.balance, me.permit.decimals) + ' ' +
+    me.permit.symbol + (funded ? ' <span class="ok">— enough</span>'
+      : ' <span class="warn">— you need ' + amount(me.permit.amount, me.permit.decimals) + '</span>') + '</div>'));
 
   if (offer.status === 'settled') {
-    app.append(el('<div class="note">Settled. ' + (offer.orderUid ? 'Order <span class="addr">' + short(offer.orderUid) + '</span>' : '') + '</div>'));
+    app.append(frag('<div class="note ok">Settled.' +
+      (offer.orderUid ? ' Order <span class="addr">' + short(offer.orderUid) + '</span>' : '') + '</div>'));
     return;
   }
 
-  const go = el('<button>' + (side === 'maker' ? 'Sign and get the link' : 'Sign and settle') + '</button>');
+  const go = node('<button>' + (me.role === 'maker' ? 'Sign and get the link' : 'Sign and settle') + '</button>');
   go.disabled = !funded;
   go.onclick = async () => {
-    go.disabled = true; go.textContent = 'Waiting for your wallet…';
+    go.disabled = true;
     try {
+      failure = null;
+      go.textContent = 'Check your wallet…';
       permitSig = me.permit.typedDataAvailable && me.permit.typedData
         ? await signTyped(me.permit.typedData)
-        : await window.ethereum.request({ method: 'personal_sign', params: [me.permit.digest, account] });
-      go.textContent = 'Second signature…';
+        : await usable.request({ method: 'personal_sign', params: [me.permit.digest, account] });
+      go.textContent = 'One more signature…';
       bundleSig = await signTyped(me.bundle.typedData);
       go.textContent = 'Submitting…';
       const body = { signature: bundleSig, permitSignature: permitSig };
-      if (side === 'maker') await post('/offers/' + id + '/signature', { role: 'maker', ...body });
+      if (me.role === 'maker') await post('/offers/' + id + '/signature', { role: 'maker', ...body });
       else await post('/offers/' + id + '/accept', body);
       await load();
-      if (side === 'taker') poll();
+      if (me.role === 'taker') poll();
     } catch (err) {
-      go.disabled = false; go.textContent = 'Try again';
-      app.append(el('<div class="note warn">' + err.message + '</div>'));
+      failure = describe(err);
+      go.disabled = false;
+      go.textContent = 'Try again';
+      render();
     }
   };
   app.append(go);
 
-  if (side === 'maker') {
+  if (me.role === 'maker') {
     const share = window.location.href;
-    app.append(el('<div class="step"><b>Send this to the other party</b>' +
-      '<div class="link"><input readonly value="' + share + '"><button class="ghost" style="width:auto">Copy</button></div></div>'));
-    app.querySelector('.link button').onclick = (e) => navigator.clipboard.writeText(share).then(() => (e.target.textContent = 'Copied'));
+    app.append(frag('<div class="step"><b>Send this to the other party</b>' +
+      '<div class="link"><input readonly value="' + share + '">' +
+      '<button class="ghost" style="width:auto">Copy</button></div></div>'));
+    app.querySelector('.link button').onclick = (event) =>
+      navigator.clipboard.writeText(share).then(() => (event.target.textContent = 'Copied'));
   }
 
   if (offer.status === 'settling' || offer.orderUid) {
-    app.append(el('<div class="note">Order is with the solvers.' +
-      '<div class="bar"><i></i></div></div>'));
+    app.append(frag('<div class="note">Order is with the solvers.<div class="bar"><i></i></div></div>'));
   }
 
-  const details = el('<details><summary>Verify independently</summary>' +
+  app.append(frag('<details><summary>Verify independently</summary>' +
     '<p class="addr">offer ' + id + ' · order owner ' + me.bundle.typedData.domain.verifyingContract + '</p>' +
     '<p class="addr">bundle digest ' + me.bundle.digest + '</p>' +
     (me.permit.digest ? '<p class="addr">permit digest ' + me.permit.digest + '</p>' : '') +
-    '</details>');
-  app.append(details);
+    '</details>'));
+}
+
+function signTyped(typedData) {
+  return usable.request({ method: 'eth_signTypedData_v4', params: [account, JSON.stringify(typedData)] });
 }
 
 function poll() {

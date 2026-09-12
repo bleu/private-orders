@@ -102,17 +102,31 @@ function relay(computed, signatures) {
       2,
     ),
   );
-  const out = execFileSync(
-    'forge',
-    ['script', 'script/LinkRelay.s.sol', '--rpc-url', RPC, '--broadcast'],
-    { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, RELAYER_PRIVATE_KEY: CONFIG.relayerKey } },
-  ).toString();
+  let out;
+  try {
+    out = execFileSync(
+      'forge',
+      ['script', 'script/LinkRelay.s.sol', '--rpc-url', RPC, '--broadcast'],
+      { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, RELAYER_PRIVATE_KEY: CONFIG.relayerKey } },
+    ).toString();
+  } catch (err) {
+    // The relay already says why in one line. Everything around it is the command that failed and
+    // forge's build notices, which is noise to whoever is holding the link.
+    throw new Error(relayReason(String(err.stderr ?? err.message ?? '')));
+  }
 
   // The relay's own lines, returned so a caller can see what happened without reading a log file.
   return out
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.includes('permit applied') || line.includes('digest matches') || line.includes('relayed'));
+}
+
+/// The first `Error: ...` line out of a failed `forge` run, without the invocation around it.
+function relayReason(text) {
+  const lines = text.split('\n').map((line) => line.trim());
+  const reason = lines.find((line) => line.startsWith('Error: ')) ?? lines.find(Boolean) ?? 'the relay failed';
+  return reason.replace(/^Error: /, '').split('\n').slice(0, 4).join(' ');
 }
 
 async function postOrder(order) {
