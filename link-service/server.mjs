@@ -262,6 +262,19 @@ async function postOrder(order) {
   return text.replace(/"/g, '');
 }
 
+/// The settlement transaction, looked up from the trade the order produced. A "settled" with no
+/// transaction is not much of a receipt.
+async function settlementTx(orderUid) {
+  try {
+    const res = await fetch(`${ORDERBOOK}/api/v1/trades?orderUid=${orderUid}`);
+    if (!res.ok) return null;
+    const trades = await res.json();
+    return Array.isArray(trades) && trades.length ? trades[0].txHash : null;
+  } catch {
+    return null;
+  }
+}
+
 async function orderStatus(uid) {
   try {
     const res = await fetch(`${ORDERBOOK}/api/v1/orders/${uid}`);
@@ -298,10 +311,15 @@ async function status(offer) {
   const current = balanceOf(offer.computed.sellToken, offer.computed.makerShed);
   const baseline = BigInt(offer.makerBalanceAtAccept ?? current);
   if (BigInt(current) < baseline) {
-    return { status: 'settled', orderUid: offer.orderUid, settlementTx: offer.settlementTx ?? null };
+    return { status: 'settled', orderUid: offer.orderUid, settlementTx: await settlementTx(offer.orderUid) };
   }
   const order = await orderStatus(offer.orderUid);
-  return { status: order.status === 'fulfilled' ? 'settled' : 'settling', orderUid: offer.orderUid };
+  const settled = order.status === 'fulfilled';
+  return {
+    status: settled ? 'settled' : 'settling',
+    orderUid: offer.orderUid,
+    settlementTx: settled ? await settlementTx(offer.orderUid) : null,
+  };
 }
 
 /// What a party must do before signing.

@@ -157,6 +157,9 @@ const until = (iso) => {
 
 async function load() {
   offer = await get('/offers/' + id);
+  if (offer.status !== 'settled') {
+    offer = { ...offer, ...(await get('/offers/' + id + '/status')) };
+  }
   document.getElementById('status').textContent = offer.status;
   document.getElementById('status').className = 'pill' + (offer.status === 'settled' ? ' ok' : '');
   render();
@@ -300,7 +303,9 @@ function render() {
 
   if (offer.status === 'settled') {
     app.append(frag('<div class="note ok">Settled.' +
-      (offer.orderUid ? ' Order <span class="addr">' + short(offer.orderUid) + '</span>' : '') + '</div>'));
+      (offer.settlementTx ? '<br>Transaction <span class="addr">' + offer.settlementTx + '</span>' : '') +
+      '<br><span class="muted">What you received is in your Shed, not your wallet — moving it out takes one ' +
+      'more signed bundle.</span></div>'));
     return;
   }
 
