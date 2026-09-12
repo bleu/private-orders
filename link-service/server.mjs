@@ -49,6 +49,7 @@ const CONFIG = {
   handler: process.env.PRIVATE_TRADE_HANDLER ?? deployed.handler,
   shedFactory: process.env.COWSHED_COMPOSABLE_COW_FACTORY_ADDRESS,
   composableCoW: process.env.COMPOSABLE_COW_ADDRESS,
+  authoriser: process.env.PRIVATE_TRADE_AUTHORISER ?? deployed.authoriser,
   vaultRelayer: process.env.VAULT_RELAYER_ADDRESS,
   relayerKey: process.env.RELAYER_PRIVATE_KEY,
 };
@@ -479,6 +480,7 @@ const server = http.createServer(async (req, res) => {
         shedFactory: CONFIG.shedFactory,
         composableCoW: CONFIG.composableCoW,
         vaultRelayer: CONFIG.vaultRelayer,
+        authoriser: CONFIG.authoriser,
       };
       const computed = compute(request);
       const id = computed.offerId.slice(2, 12);

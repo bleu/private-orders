@@ -6,6 +6,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {PrivateTradeWrapper} from "../src/PrivateTradeWrapper.sol";
 import {PrivateTradeOrder} from "../src/PrivateTradeOrder.sol";
 import {PrivateTradeSubmitter} from "../src/PrivateTradeSubmitter.sol";
+import {PrivateTradeAuthoriser} from "../src/PrivateTradeAuthoriser.sol";
 import {ICowSettlement} from "../src/vendor/CowWrapper.sol";
 
 /// @notice Deploys the three contracts a private trade needs on a running chain, and writes their
@@ -29,6 +30,7 @@ contract DeployPrivateTrade is Script {
     PrivateTradeWrapper wrapper = new PrivateTradeWrapper(ICowSettlement(settlement));
     PrivateTradeOrder handler = new PrivateTradeOrder(wrapper);
     PrivateTradeSubmitter submitter = new PrivateTradeSubmitter();
+    PrivateTradeAuthoriser authoriser = new PrivateTradeAuthoriser();
 
     vm.stopBroadcast();
 
@@ -41,6 +43,8 @@ contract DeployPrivateTrade is Script {
       vm.toString(address(handler)),
       '","submitter":"',
       vm.toString(address(submitter)),
+      '","authoriser":"',
+      vm.toString(address(authoriser)),
       '"}\n'
     );
     vm.writeFile("out-json/private-trade-deployed.json", json);
@@ -48,5 +52,6 @@ contract DeployPrivateTrade is Script {
     console.log("wrapper  ", address(wrapper));
     console.log("handler  ", address(handler));
     console.log("submitter", address(submitter));
+    console.log("authoriser", address(authoriser));
   }
 }

@@ -16,6 +16,7 @@ import {IConditionalOrder} from "composable-cow/interfaces/IConditionalOrder.sol
 import {COWShedFactory} from "cow-shed/COWShedFactory.sol";
 import {Call} from "cow-shed/ICOWAuthHook.sol";
 
+import {PrivateTradeAuthoriser} from "../../src/PrivateTradeAuthoriser.sol";
 import {PrivateTradeWrapper} from "../../src/PrivateTradeWrapper.sol";
 import {PrivateTradeOrder} from "../../src/PrivateTradeOrder.sol";
 import {PrivateTradeLib} from "../../src/libraries/PrivateTradeLib.sol";
@@ -72,6 +73,7 @@ abstract contract PrivateTradeE2EBase is Test {
 
   GPv2Settlement internal settlement;
   ComposableCoW internal cow;
+  PrivateTradeAuthoriser internal authoriser;
   COWShedFactory internal shedFactory;
   PrivateTradeWrapper internal wrapper;
   PrivateTradeOrder internal handler;
@@ -117,6 +119,7 @@ abstract contract PrivateTradeE2EBase is Test {
     _setUpShedFactory();
 
     wrapper = new PrivateTradeWrapper(ICowSettlement(SETTLEMENT));
+    authoriser = new PrivateTradeAuthoriser();
     handler = new PrivateTradeOrder(wrapper);
     submitter = new PrivateTradeSubmitter();
 
@@ -417,11 +420,13 @@ abstract contract PrivateTradeE2EBase is Test {
       isDelegateCall: false
     });
     calls[1] = Call({
-      target: COMPOSABLE_COW,
+      target: address(authoriser),
       value: 0,
-      callData: abi.encodeCall(ComposableCoW.create, (params, false)),
+      callData: abi.encodeCall(PrivateTradeAuthoriser.createChecked, (cow, params)),
       allowFailure: false,
-      isDelegateCall: false
+      // A delegatecall: only then can the authoriser read the Shed's admin, which is what it
+      // compares the beneficiary against.
+      isDelegateCall: true
     });
   }
 

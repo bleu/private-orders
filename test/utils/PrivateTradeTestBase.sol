@@ -18,6 +18,7 @@ import {GPv2Signing} from "cowprotocol/contracts/mixins/GPv2Signing.sol";
 import {ComposableCoW} from "composable-cow/ComposableCoW.sol";
 import {IConditionalOrder} from "composable-cow/interfaces/IConditionalOrder.sol";
 
+import {PrivateTradeAuthoriser} from "../../src/PrivateTradeAuthoriser.sol";
 import {PrivateTradeWrapper} from "../../src/PrivateTradeWrapper.sol";
 import {PrivateTradeOrder} from "../../src/PrivateTradeOrder.sol";
 import {PrivateTradeLib} from "../../src/libraries/PrivateTradeLib.sol";
@@ -43,6 +44,7 @@ abstract contract PrivateTradeTestBase is Test {
   GPv2AllowListAuthentication internal allowList;
   GPv2Settlement internal settlement;
   ComposableCoW internal cow;
+  PrivateTradeAuthoriser internal authoriser;
   PrivateTradeWrapper internal wrapper;
   PrivateTradeOrder internal handler;
   CowWrapperHelpers internal helpers;
@@ -73,6 +75,7 @@ abstract contract PrivateTradeTestBase is Test {
     cow = new ComposableCoW(address(settlement));
 
     wrapper = new PrivateTradeWrapper(ICowSettlement(address(settlement)));
+    authoriser = new PrivateTradeAuthoriser();
     handler = new PrivateTradeOrder(wrapper);
     helpers = new CowWrapperHelpers(ICowAuthentication(address(allowList)));
 

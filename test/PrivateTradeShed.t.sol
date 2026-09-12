@@ -11,6 +11,7 @@ import {Call} from "cow-shed/ICOWAuthHook.sol";
 import {IComposableCow} from "cow-shed/IComposableCow.sol";
 
 import {PrivateTradeTerms, PrivateTradeRole, PrivateTrade_NoActiveTrade} from "../src/interfaces/IPrivateTrade.sol";
+import {PrivateTradeAuthoriser} from "../src/PrivateTradeAuthoriser.sol";
 import {PrivateTradeTestBase} from "./utils/PrivateTradeTestBase.sol";
 
 /// @notice The real EOA path: two externally owned accounts own their orders through CoW Sheds.
@@ -85,6 +86,40 @@ contract PrivateTradeShedTest is PrivateTradeTestBase {
     assertEq(usdc.balanceOf(bobEoa), USDC_AMOUNT, "bob's wallet did not receive USDC");
     assertEq(wbtc.balanceOf(aliceShed), 0, "alice's shed received the proceeds");
     assertEq(usdc.balanceOf(bobShed), 0, "bob's shed received the proceeds");
+  }
+
+  /// @dev The reason the beneficiary check exists, and the reason it runs inside the party's own
+  /// bundle: terms that pay someone other than the party's own wallet must not produce an order.
+  ///
+  /// Without this, a proposer could name itself as the counterparty's beneficiary. The wallet would
+  /// show the typed data, but the terms are an opaque blob inside the `create` call, so nothing the
+  /// party sees would reveal it.
+  function test_bundleRefusesToPaySomeoneElse() public {
+    // Alice composes the terms and names herself as the beneficiary of Bob's side.
+    PrivateTradeTerms memory terms = _termsFull(aliceShed, bobShed, bobShed, aliceEoa, aliceEoa);
+    IConditionalOrder.ConditionalOrderParams memory takerParams = _params(PrivateTradeRole.Taker, terms, "taker");
+
+    wbtc.mint(bobShed, WBTC_AMOUNT);
+
+    vm.expectRevert();
+    _relayBundle(bobEoa, bobPk, bobShed, _bundle(address(wbtc), WBTC_AMOUNT, takerParams));
+
+    assertFalse(cow.singleOrders(bobShed, cow.hash(takerParams)), "an order that pays someone else was created");
+  }
+
+  /// @dev The side is derived from which Shed executes, so a bundle cannot point a Shed at the
+  /// check for the other side — which it would pass while its own proceeds went elsewhere.
+  function test_bundleCannotClaimTheOtherSide() public {
+    PrivateTradeTerms memory terms = _termsFull(aliceShed, bobShed, bobShed, aliceEoa, bobEoa);
+
+    // Bob's Shed, told it is the maker: the maker's beneficiary is Alice's wallet.
+    IConditionalOrder.ConditionalOrderParams memory params = _params(PrivateTradeRole.Maker, terms, "taker");
+    wbtc.mint(bobShed, WBTC_AMOUNT);
+
+    vm.expectRevert();
+    _relayBundle(bobEoa, bobPk, bobShed, _bundle(address(wbtc), WBTC_AMOUNT, params));
+
+    assertFalse(cow.singleOrders(bobShed, cow.hash(params)), "a Shed authorised the other side's order");
   }
 
   /// @dev The Shed has to authorise the order. With the approval in place but no `create` call,
@@ -168,11 +203,11 @@ contract PrivateTradeShedTest is PrivateTradeTestBase {
       isDelegateCall: false
     });
     calls[1] = Call({
-      target: address(cow),
+      target: address(authoriser),
       value: 0,
-      callData: abi.encodeCall(ComposableCoW.create, (params, false)),
+      callData: abi.encodeCall(PrivateTradeAuthoriser.createChecked, (cow, params)),
       allowFailure: false,
-      isDelegateCall: false
+      isDelegateCall: true
     });
   }
 

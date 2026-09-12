@@ -11,6 +11,8 @@ import {Call} from "cow-shed/ICOWAuthHook.sol";
 
 import {PrivateOffer, PrivateTradeTerms, PrivateTradeRole} from "../src/interfaces/IPrivateTrade.sol";
 import {PrivateTradeBuilder} from "../src/libraries/PrivateTradeBuilder.sol";
+import {ShedBundle} from "../src/libraries/ShedBundle.sol";
+import {PrivateTradeAuthoriser} from "../src/PrivateTradeAuthoriser.sol";
 import {PrivateTradeLib} from "../src/libraries/PrivateTradeLib.sol";
 import {PrivateTradeAppData} from "../src/libraries/PrivateTradeAppData.sol";
 import {PrivateTradeWrapper} from "../src/PrivateTradeWrapper.sol";
@@ -54,6 +56,7 @@ contract PreparePrivateTrade is Script {
     uint256 usdcAmount;
     uint256 daiAmount;
     uint256 validFor;
+    address authoriser;
     address makerEoa;
     address takerEoa;
     address makerShed;
@@ -136,6 +139,7 @@ contract PreparePrivateTrade is Script {
     c.deployerPrivateKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
     c.makerPrivateKey = vm.envUint("MAKER_PRIVATE_KEY");
     c.takerPrivateKey = vm.envUint("TAKER_PRIVATE_KEY");
+    c.authoriser = vm.envAddress("PRIVATE_TRADE_AUTHORISER");
     c.wrapper = vm.envAddress("PRIVATE_TRADE_WRAPPER");
     c.handler = vm.envAddress("PRIVATE_TRADE_HANDLER");
     c.shedFactory = vm.envAddress("COWSHED_COMPOSABLE_COW_FACTORY_ADDRESS");
@@ -176,13 +180,8 @@ contract PreparePrivateTrade is Script {
       allowFailure: false,
       isDelegateCall: false
     });
-    calls[1] = Call({
-      target: c.composableCoW,
-      value: 0,
-      callData: abi.encodeCall(ComposableCoW.create, (a.params, false)),
-      allowFailure: false,
-      isDelegateCall: false
-    });
+    // Through the authoriser: an order that pays anyone but the party must not be creatable.
+    calls[1] = ShedBundle.createCall(c.authoriser, c.composableCoW, a.params);
 
     // Unique per run: the offer salt is fresh each time, so re-running does not collide with
     // an already-consumed nonce.
@@ -303,6 +302,7 @@ contract PreparePrivateTrade is Script {
     IConditionalOrder.ConditionalOrderParams memory params,
     address composableCoW
   ) private view returns (Call[] memory calls) {
+    address authoriser = vm.envAddress("PRIVATE_TRADE_AUTHORISER");
     calls = new Call[](2);
     calls[0] = Call({
       target: sellToken,
@@ -312,11 +312,11 @@ contract PreparePrivateTrade is Script {
       isDelegateCall: false
     });
     calls[1] = Call({
-      target: composableCoW,
+      target: authoriser,
       value: 0,
-      callData: abi.encodeCall(ComposableCoW.create, (params, false)),
+      callData: abi.encodeCall(PrivateTradeAuthoriser.createChecked, (ComposableCoW(composableCoW), params)),
       allowFailure: false,
-      isDelegateCall: false
+      isDelegateCall: true
     });
   }
 

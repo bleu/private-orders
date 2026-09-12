@@ -40,6 +40,7 @@ contract LinkCompute is Script {
     address shedFactory;
     address composableCoW;
     address vaultRelayer;
+    address authoriser;
     bool fund;
   }
 
@@ -120,11 +121,9 @@ contract LinkCompute is Script {
     json = string.concat(json, ',"sellToken":"', vm.toString(sellToken));
     json = string.concat(json, '","sellAmount":"', vm.toString(sellAmount));
     json = string.concat(json, '","funded":', request.fund ? "true" : "false");
-    json = string.concat(json, ',"approveCall":"', vm.toString(calls[request.fund ? 1 : 0].callData));
-    if (request.fund) {
-      json = string.concat(json, '","fundCall":"', vm.toString(calls[0].callData));
-    }
-    json = string.concat(json, '","createCall":"', vm.toString(calls[request.fund ? 2 : 1].callData));
+    // The calls as data, including the flags. The relay rebuilds the bundle from this, so a call
+    // whose flags it assumed would produce a digest that does not match the signature.
+    json = string.concat(json, _jsonCalls(calls));
     json = string.concat(json, _permitJson(sellToken, owner, shed, sellAmount, deadline));
     // `permitNonce` is a number, so the next fragment opens with a comma rather than a closing quote.
     // The same message as typed data, so a wallet can show the calls instead of a bare digest.
@@ -145,7 +144,8 @@ contract LinkCompute is Script {
     returns (string memory json)
   {
     TokenPermit.Permit memory permit = TokenPermit.build(sellToken, owner, shed, sellAmount, deadline);
-    json = string.concat('","permitKind":"', _permitKind(permit.kind));
+    // The calls end in an array, so this fragment opens with a comma, not a closing quote.
+    json = string.concat(',"permitKind":"', _permitKind(permit.kind));
     json = string.concat(json, '","permitDigest":"', vm.toString(TokenPermit.digest(permit)));
     json = string.concat(json, '","permitNonce":', vm.toString(permit.nonce));
     // Typed data only when the token's domain fields provably reproduce its own DOMAIN_SEPARATOR,
@@ -156,6 +156,32 @@ contract LinkCompute is Script {
     if (TokenPermit.typedDataAvailable(permit)) {
       json = string.concat(json, ',"permitTypedData":', TokenPermit.typedData(permit));
     }
+  }
+
+  /// @dev Parallel arrays rather than an array of objects: `abi.decode` will not turn a JSON array of
+  /// objects into a struct array, and the relay needs to read these back exactly.
+  function _jsonCalls(Call[] memory calls) private view returns (string memory json) {
+    json = ',"callTargets":[';
+    for (uint256 i = 0; i < calls.length; ++i) {
+      if (i > 0) json = string.concat(json, ",");
+      json = string.concat(json, '"', vm.toString(calls[i].target), '"');
+    }
+    json = string.concat(json, '],"callDataHex":[');
+    for (uint256 i = 0; i < calls.length; ++i) {
+      if (i > 0) json = string.concat(json, ",");
+      json = string.concat(json, '"', vm.toString(calls[i].callData), '"');
+    }
+    json = string.concat(json, '],"callAllowFailure":[');
+    for (uint256 i = 0; i < calls.length; ++i) {
+      if (i > 0) json = string.concat(json, ",");
+      json = string.concat(json, calls[i].allowFailure ? "true" : "false");
+    }
+    json = string.concat(json, '],"callDelegateCall":[');
+    for (uint256 i = 0; i < calls.length; ++i) {
+      if (i > 0) json = string.concat(json, ",");
+      json = string.concat(json, calls[i].isDelegateCall ? "true" : "false");
+    }
+    json = string.concat(json, "]");
   }
 
   function _permitKind(TokenPermit.Kind kind) private pure returns (string memory) {
@@ -195,13 +221,8 @@ contract LinkCompute is Script {
       allowFailure: false,
       isDelegateCall: false
     });
-    calls[i] = Call({
-      target: request.composableCoW,
-      value: 0,
-      callData: abi.encodeCall(ComposableCoW.create, (params, false)),
-      allowFailure: false,
-      isDelegateCall: false
-    });
+    // Through the authoriser, so the Shed refuses to create an order that pays anyone but its owner.
+    calls[i] = ShedBundle.createCall(request.authoriser, request.composableCoW, params);
   }
 
   function _digest(Request memory request, address shed, Call[] memory calls, bytes32 nonce, uint256 deadline)
@@ -316,6 +337,7 @@ contract LinkCompute is Script {
     request.shedFactory = vm.parseJsonAddress(json, ".shedFactory");
     request.composableCoW = vm.parseJsonAddress(json, ".composableCoW");
     request.vaultRelayer = vm.parseJsonAddress(json, ".vaultRelayer");
+    request.authoriser = vm.parseJsonAddress(json, ".authoriser");
     // Fund the Shed inside the signed bundle by default; `.fund = false` asks for authorisation
     // only, for a party who would rather move the tokens themselves.
     request.fund = !vm.keyExistsJson(json, ".fund") || vm.parseJsonBool(json, ".fund");

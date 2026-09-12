@@ -8,6 +8,8 @@ import {Call} from "cow-shed/ICOWAuthHook.sol";
 import {COWShedFactory} from "cow-shed/COWShedFactory.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
+import {PrivateTradeAuthoriser} from "../PrivateTradeAuthoriser.sol";
+
 interface IShedVersion {
   function VERSION() external view returns (string memory);
 }
@@ -41,12 +43,33 @@ library ShedBundle {
     uint256 deadline;
   }
 
+  /// @notice The call that authorises an order, through the check that the terms pay this party.
+  ///
+  /// @dev A delegatecall, and it has to be: only inside a delegatecall can the Shed read its own
+  /// admin, which is what the check compares the beneficiary against. One definition, because every
+  /// bundle that authorises an order has to go through it — a bundle that called `ComposableCoW`
+  /// directly would create an order that pays whoever composed the terms.
+  function createCall(address authoriser, address composableCoW, IConditionalOrder.ConditionalOrderParams memory params)
+    internal
+    pure
+    returns (Call memory)
+  {
+    return Call({
+      target: authoriser,
+      value: 0,
+      callData: abi.encodeCall(PrivateTradeAuthoriser.createChecked, (ComposableCoW(composableCoW), params)),
+      allowFailure: false,
+      isDelegateCall: true
+    });
+  }
+
   /// @notice The two calls a private trade party signs: approve the vault relayer, authorise the
   /// conditional order.
   function calls(
     address sellToken,
     uint256 sellAmount,
     address vaultRelayer,
+    address authoriser,
     address composableCoW,
     IConditionalOrder.ConditionalOrderParams memory params
   ) internal pure returns (Call[] memory result) {
@@ -58,13 +81,7 @@ library ShedBundle {
       allowFailure: false,
       isDelegateCall: false
     });
-    result[1] = Call({
-      target: composableCoW,
-      value: 0,
-      callData: abi.encodeCall(ComposableCoW.create, (params, false)),
-      allowFailure: false,
-      isDelegateCall: false
-    });
+    result[1] = createCall(authoriser, composableCoW, params);
   }
 
   function domainSeparator(address shedFactory, address shed) internal view returns (bytes32) {

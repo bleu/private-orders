@@ -147,35 +147,20 @@ contract LinkRelay is Script {
     COWShedFactory(shedFactory).executeHooks(bundle_.calls, bundle_.nonce, bundle_.deadline, bundle_.owner, signature);
   }
 
+  /// @dev Built from the file, flags included. Nothing here decides what a call is: an assumption
+  /// about `isDelegateCall` is enough to rebuild a different bundle than the party signed.
   function _bundle(string memory computed, string memory key) private view returns (ShedBundle.Bundle memory) {
-    address sellToken = vm.parseJsonAddress(computed, string.concat(key, ".sellToken"));
-    bool funds = vm.parseJsonBool(computed, string.concat(key, ".funded"));
+    address[] memory targets = abi.decode(vm.parseJson(computed, string.concat(key, ".callTargets")), (address[]));
+    bytes[] memory data = abi.decode(vm.parseJson(computed, string.concat(key, ".callDataHex")), (bytes[]));
+    bool[] memory allowFailure = abi.decode(vm.parseJson(computed, string.concat(key, ".callAllowFailure")), (bool[]));
+    bool[] memory delegateCall = abi.decode(vm.parseJson(computed, string.concat(key, ".callDelegateCall")), (bool[]));
 
-    Call[] memory calls = new Call[](funds ? 3 : 2);
-    uint256 i = 0;
-    if (funds) {
-      calls[i++] = Call({
-        target: sellToken,
-        value: 0,
-        callData: vm.parseJsonBytes(computed, string.concat(key, ".fundCall")),
-        allowFailure: false,
-        isDelegateCall: false
+    Call[] memory calls = new Call[](targets.length);
+    for (uint256 i = 0; i < targets.length; ++i) {
+      calls[i] = Call({
+        target: targets[i], value: 0, callData: data[i], allowFailure: allowFailure[i], isDelegateCall: delegateCall[i]
       });
     }
-    calls[i++] = Call({
-      target: sellToken,
-      value: 0,
-      callData: vm.parseJsonBytes(computed, string.concat(key, ".approveCall")),
-      allowFailure: false,
-      isDelegateCall: false
-    });
-    calls[i] = Call({
-      target: vm.envAddress("COMPOSABLE_COW_ADDRESS"),
-      value: 0,
-      callData: vm.parseJsonBytes(computed, string.concat(key, ".createCall")),
-      allowFailure: false,
-      isDelegateCall: false
-    });
 
     return ShedBundle.Bundle({
       owner: vm.parseJsonAddress(computed, string.concat(key, ".owner")),
