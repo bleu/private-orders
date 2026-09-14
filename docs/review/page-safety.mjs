@@ -24,6 +24,7 @@ import {
   MAKER,
   MAKER_SHED,
   TAKER,
+  TAKER_SHED,
   USDC,
   createOffer,
   freePort,
@@ -342,6 +343,33 @@ test('a wallet that switched accounts cannot sign for this trade', async () => {
 
     const stored = offerRecord(fixture.root, offer.id).signatures?.maker;
     assert.equal(stored, undefined, 'a signature was stored from the wrong account');
+  } finally {
+    browser.close();
+    await fixture.stop();
+  }
+});
+
+test('the other side is shown as their order contract, not as the person', async () => {
+  const fixture = await serviceWith({});
+  const browser = await launchChrome();
+  try {
+    const offer = await createOffer(fixture.port, { sellAmount: '100000000' });
+    await browser.open(offerUrl(fixture.port, offer.id));
+    await browser.waitFor("document.body.innerText.toLowerCase().includes('your part')", 'the trade page');
+
+    // The maker's counterparty is the taker's Shed, which is derivable from the taker's address by
+    // anyone who has it — so the page must not present it as if it were the taker.
+    const shown = await browser.evaluate(`document.body.innerText.includes('${TAKER_SHED}')`);
+    assert.equal(shown, true, 'the counterparty Shed was not shown');
+
+    const labelled = await browser.evaluate(
+      "document.body.innerText.toLowerCase().includes('their order owner') && " +
+      "document.body.innerText.toLowerCase().includes('not their wallet')",
+    );
+    assert.equal(labelled, true, 'the address was presented as the counterparty rather than their order contract');
+
+    const claimsShed = await browser.evaluate("document.body.innerText.toLowerCase().includes('cow shed')");
+    assert.equal(claimsShed, true, 'the page did not say what kind of contract it is');
   } finally {
     browser.close();
     await fixture.stop();

@@ -339,8 +339,15 @@ function render() {
       'nothing happens until they do.</div>'));
   }
 
-  app.append(frag('<h2>Counterparty</h2><div class="trade"><div class="row">' +
-    '<span class="addr">' + esc(me.counterparty) + '</span></div></div>'));
+  // Deliberately the other party's Shed and not their wallet: this link is a bearer token, so
+  // publishing the person's address to anyone holding it would be worse than publishing a contract
+  // that only owns their order. But an address labelled "counterparty" reads like the person you are
+  // dealing with, and it is not one — so the label says what it is.
+  app.append(frag('<h2>The other side</h2><div class="trade">' +
+    '<div class="row"><span>Their order owner</span></div>' +
+    '<div class="row"><span class="addr">' + esc(me.counterparty) + '</span></div>' +
+    '<p class="sub" style="margin:.5rem 0 0">A CoW Shed — the contract that holds their order, not their ' +
+    'wallet. Anyone holding this link can read it, so their wallet address is not published.</p></div>'));
 
   if (offer.status === 'settled') {
     app.append(frag('<h2>Receipt</h2><div class="trade">' +
