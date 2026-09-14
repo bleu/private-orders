@@ -130,6 +130,33 @@ The relay **replays the computed plan and never recomputes it.** A recomputed de
 message, and a signature that is perfectly valid for what was signed fails against it — which is the
 mistake the script made first, and it looked exactly like a broken signature.
 
+## Lifecycle, and what a status means
+
+An offer moves through states the service derives from the chain and the orderbook, not from its own
+bookkeeping. `GET /offers/:id/status` returns one of:
+
+| Status | Meaning |
+| --- | --- |
+| `open` | Created. Neither party has signed. |
+| `signed` | At least one party has signed. |
+| `expired` | Past `validTo` and no order was posted. |
+| `funding` / `funded` / `published` | An acceptance is in progress. Reported only while it is running. |
+| `recovery_available` | Funding succeeded, but publishing or posting the order failed. The reason is in `error`; the party can still withdraw from its Shed. |
+| `settling` | An order was posted and is not yet fully evidenced as settled. |
+| `settled` | The intended order is fulfilled, its transaction has a successful receipt, and the wrapper reports the offer consumed. All three, or it is not settled. |
+| `cancelled` | The maker revoked the order and cancelled the offer, in one owner-signed transaction. |
+
+The maker cancels with `GET /offers/:id/cancel` (returns the digest and typed data) and
+`POST /offers/:id/cancel` (relays the signature). The bundle executes two calls from the maker's Shed:
+`ComposableCoW.remove` and `cancelOffer` on the wrapper. Both or neither — a cancellation cannot
+leave the order revoked but the offer still settleable, and it cannot lose the race to a settlement,
+because a consumed offer refuses to be cancelled.
+
+**Retries are safe by construction.** The relay skipped a Shed whose bundle nonce is already spent
+before it touches the permit, so a retry after partial funding converges instead of failing on a
+consumed permit. The order UID is derived from the order, so re-posting an accepted offer is the same
+order.
+
 ## Known gaps
 
 - **A party signs twice.** The bundle and the permit are separate EIP-712 domains (the Shed's and the
@@ -141,9 +168,17 @@ mistake the script made first, and it looked exactly like a broken signature.
   terms change, so it needs a redeploy and re-signing, which is why the button came first.
 - **A permit signed at offer time can expire before settlement.** Its deadline is the offer's, so a
   long-lived offer needs a fresh permit rather than a stale one.
-- **Storage is local files.** Offers live under `out-json/link/`. A deployment needs a database and
-  a reaper for expired offers.
+- **Storage is local files.** Offers live under `out-json/link/`. Records and sub-solver files are
+  written to a temporary file and renamed, so a reader never sees a partial one, but a deployment
+  needs a database and a reaper for expired offers.
+- **Acceptance locking is per process.** A second acceptance of the same offer is refused while one is
+  in flight, but only within one service process. Two instances over one store still need a
+  store-level lock or a single writer; the worst case is duplicated relay work and a confusing second
+  answer, because the relay is idempotent and the order UID is derived from the order.
 - **No offer expiry sweep.** An offer that is never accepted keeps its authorisation on-chain until
-  `validTo`; nothing revokes it early.
-- **Open offers are untested.** The path exists (`taker` optional, recomputed on accept) but only
-  address-restricted offers are covered by the end-to-end script.
+  `validTo`; nothing revokes it early. `validTo` is enforced by the order itself.
+- **Open offers are not supported.** A concrete taker address is required at creation; the earlier
+  optional-taker path recomputed terms on accept and invalidated the maker's signature. Supporting it
+  needs a separate authorization design.
+- **Synchronous subprocess calls.** Computing, relaying and cancelling run `forge`/`cast` in the
+  request path, which blocks the process for the duration. Fine for a beta; a queue is the next step.

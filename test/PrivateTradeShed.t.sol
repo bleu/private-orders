@@ -10,8 +10,16 @@ import {COWShedForComposableCoW} from "cow-shed/COWShedForComposableCoW.sol";
 import {Call} from "cow-shed/ICOWAuthHook.sol";
 import {IComposableCow} from "cow-shed/IComposableCow.sol";
 
-import {PrivateTradeTerms, PrivateTradeRole, PrivateTrade_NoActiveTrade} from "../src/interfaces/IPrivateTrade.sol";
+import {
+  PrivateTradeTerms,
+  PrivateTradeRole,
+  PrivateTradeOfferState,
+  PrivateTrade_NoActiveTrade,
+  PrivateTrade_OfferCancelled
+} from "../src/interfaces/IPrivateTrade.sol";
 import {PrivateTradeAuthoriser} from "../src/PrivateTradeAuthoriser.sol";
+import {PrivateTradeLib} from "../src/libraries/PrivateTradeLib.sol";
+import {ShedBundle} from "../src/libraries/ShedBundle.sol";
 import {PrivateTradeTestBase} from "./utils/PrivateTradeTestBase.sol";
 
 /// @notice The real EOA path: two externally owned accounts own their orders through CoW Sheds.
@@ -184,6 +192,28 @@ contract PrivateTradeShedTest is PrivateTradeTestBase {
 
     vm.expectRevert();
     factory.executeHooks(calls, nonce, block.timestamp + 1 hours, aliceEoa, abi.encodePacked(r, s, v));
+  }
+
+  function test_makerCancellationAtomicallyRevokesOrderAndOffer() public {
+    PrivateTradeTerms memory terms = _termsFull(aliceShed, bobShed, bobShed, aliceEoa, bobEoa);
+    IConditionalOrder.ConditionalOrderParams memory makerParams = _params(PrivateTradeRole.Maker, terms, "maker");
+    IConditionalOrder.ConditionalOrderParams memory takerParams = _params(PrivateTradeRole.Taker, terms, "taker");
+
+    usdc.mint(aliceShed, USDC_AMOUNT);
+    wbtc.mint(bobShed, WBTC_AMOUNT);
+    _relayBundle(aliceEoa, alicePk, aliceShed, _bundle(address(usdc), USDC_AMOUNT, makerParams));
+    _relayBundle(bobEoa, bobPk, bobShed, _bundle(address(wbtc), WBTC_AMOUNT, takerParams));
+
+    Call[] memory cancellation = ShedBundle.cancellationCalls(address(cow), makerParams, address(wrapper), terms.offer);
+    _relayBundleWithNonce(aliceEoa, alicePk, aliceShed, cancellation, keccak256("cancel"));
+
+    bytes32 offerId = PrivateTradeLib.offerId(terms.offer);
+    assertFalse(cow.singleOrders(aliceShed, cow.hash(makerParams)), "maker order remains authorised");
+    assertEq(uint256(wrapper.offerState(offerId)), uint256(PrivateTradeOfferState.Cancelled));
+
+    vm.prank(solver);
+    vm.expectRevert(abi.encodeWithSelector(PrivateTrade_OfferCancelled.selector, offerId));
+    wrapper.wrappedSettle(_settleData(terms, makerParams, takerParams), _chainedWrapperData(terms));
   }
 
   // --- bundles

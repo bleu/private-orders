@@ -9,6 +9,7 @@ import {COWShedFactory} from "cow-shed/COWShedFactory.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 import {PrivateTradeAuthoriser} from "../PrivateTradeAuthoriser.sol";
+import {IPrivateTradeWrapper, PrivateOffer} from "../interfaces/IPrivateTrade.sol";
 
 interface IShedVersion {
   function VERSION() external view returns (string memory);
@@ -82,6 +83,31 @@ library ShedBundle {
       isDelegateCall: false
     });
     result[1] = createCall(authoriser, composableCoW, params);
+  }
+
+  /// @notice Atomically revoke the maker order and mark its offer cancelled in the wrapper.
+  /// @dev Both calls execute from the maker Shed. If either fails, neither state change persists.
+  function cancellationCalls(
+    address composableCoW,
+    IConditionalOrder.ConditionalOrderParams memory makerParams,
+    address wrapper,
+    PrivateOffer memory offer
+  ) internal pure returns (Call[] memory result) {
+    result = new Call[](2);
+    result[0] = Call({
+      target: composableCoW,
+      value: 0,
+      callData: abi.encodeCall(ComposableCoW.remove, (ComposableCoW(composableCoW).hash(makerParams))),
+      allowFailure: false,
+      isDelegateCall: false
+    });
+    result[1] = Call({
+      target: wrapper,
+      value: 0,
+      callData: abi.encodeCall(IPrivateTradeWrapper.cancelOffer, (offer)),
+      allowFailure: false,
+      isDelegateCall: false
+    });
   }
 
   function domainSeparator(address shedFactory, address shed) internal view returns (bytes32) {

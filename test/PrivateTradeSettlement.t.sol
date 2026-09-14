@@ -25,7 +25,10 @@ import {
   PrivateTrade_BadTaker,
   PrivateTrade_OfferIdMismatch,
   PrivateTrade_InvalidSettleData,
-  PrivateTrade_OfferConsumed
+  PrivateTrade_OfferConsumed,
+  PrivateTrade_OfferCancelled,
+  PrivateTrade_NotOfferMaker,
+  PrivateTrade_CannotCancelConsumed
 } from "../src/interfaces/IPrivateTrade.sol";
 import {PrivateTradeLib} from "../src/libraries/PrivateTradeLib.sol";
 import {PrivateTradeBuilder} from "../src/libraries/PrivateTradeBuilder.sol";
@@ -239,6 +242,65 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
     _approveRelayer(alice, usdc, USDC_AMOUNT);
     _settle(terms, makerParams, takerParams);
     assertEq(uint256(wrapper.offerState(offerId)), uint256(PrivateTradeOfferState.Consumed));
+  }
+
+  function test_makerWalletCanCancelAvailableOffer() public {
+    (
+      PrivateTradeTerms memory terms,
+      IConditionalOrder.ConditionalOrderParams memory makerParams,
+      IConditionalOrder.ConditionalOrderParams memory takerParams
+    ) = _readyTrade();
+
+    vm.prank(aliceOwner);
+    alice.execute(
+      address(wrapper),
+      abi.encodeWithSignature(
+        "cancelOffer((address,address,address,uint256,address,uint256,uint32,bytes32))", terms.offer
+      )
+    );
+
+    assertEq(
+      uint256(wrapper.offerState(PrivateTradeLib.offerId(terms.offer))), uint256(PrivateTradeOfferState.Cancelled)
+    );
+
+    vm.prank(solver);
+    vm.expectRevert(abi.encodeWithSelector(PrivateTrade_OfferCancelled.selector, PrivateTradeLib.offerId(terms.offer)));
+    wrapper.wrappedSettle(_settleData(terms, makerParams, takerParams), _chainedWrapperData(terms));
+  }
+
+  function test_onlyMakerWalletCanCancelOffer() public {
+    (PrivateTradeTerms memory terms,,) = _readyTrade();
+    address unrelated = makeAddr("unrelated");
+
+    vm.prank(unrelated);
+    vm.expectRevert(abi.encodeWithSelector(PrivateTrade_NotOfferMaker.selector, address(alice), unrelated));
+    wrapper.cancelOffer(terms.offer);
+  }
+
+  function test_consumedOfferCannotBeCancelled() public {
+    (
+      PrivateTradeTerms memory terms,
+      IConditionalOrder.ConditionalOrderParams memory makerParams,
+      IConditionalOrder.ConditionalOrderParams memory takerParams
+    ) = _readyTrade();
+    bytes32 offerId = PrivateTradeLib.offerId(terms.offer);
+    _settle(terms, makerParams, takerParams);
+
+    vm.prank(address(alice));
+    vm.expectRevert(abi.encodeWithSelector(PrivateTrade_CannotCancelConsumed.selector, offerId));
+    wrapper.cancelOffer(terms.offer);
+  }
+
+  function test_cancellationIsIdempotent() public {
+    (PrivateTradeTerms memory terms,,) = _readyTrade();
+    bytes32 offerId = PrivateTradeLib.offerId(terms.offer);
+
+    vm.startPrank(address(alice));
+    wrapper.cancelOffer(terms.offer);
+    wrapper.cancelOffer(terms.offer);
+    vm.stopPrank();
+
+    assertEq(uint256(wrapper.offerState(offerId)), uint256(PrivateTradeOfferState.Cancelled));
   }
 
   // --- bundle-specific rules

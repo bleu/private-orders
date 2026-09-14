@@ -32,7 +32,11 @@ import {
   PrivateTrade_ProposalPayloadMismatch,
   PrivateTrade_ProposalBadSignature,
   PrivateTrade_OfferConsumed,
+  PrivateTrade_OfferCancelled,
+  PrivateTrade_NotOfferMaker,
+  PrivateTrade_CannotCancelConsumed,
   PrivateTradeOfferConsumed,
+  PrivateTradeOfferCancelled,
   PrivateTradeSubmitted
 } from "./interfaces/IPrivateTrade.sol";
 import {PrivateTradeLib} from "./libraries/PrivateTradeLib.sol";
@@ -83,6 +87,19 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
     return _offerStates[offerId_];
   }
 
+  /// @inheritdoc IPrivateTradeWrapper
+  function cancelOffer(PrivateOffer calldata offer) external {
+    if (msg.sender != offer.maker) revert PrivateTrade_NotOfferMaker(offer.maker, msg.sender);
+
+    bytes32 offerId_ = PrivateTradeLib.offerId(offer);
+    PrivateTradeOfferState state = _offerStates[offerId_];
+    if (state == PrivateTradeOfferState.Consumed) revert PrivateTrade_CannotCancelConsumed(offerId_);
+    if (state == PrivateTradeOfferState.Cancelled) return;
+
+    _offerStates[offerId_] = PrivateTradeOfferState.Cancelled;
+    emit PrivateTradeOfferCancelled(offerId_);
+  }
+
   /// @inheritdoc ICowWrapper
   function name() external pure override returns (string memory) {
     return "PrivateTradeWrapper";
@@ -117,9 +134,11 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
 
     _validateSettlement(tokens, clearingPrices, trades, interactions, terms);
 
-    if (_offerStates[offerId_] == PrivateTradeOfferState.Consumed) {
+    PrivateTradeOfferState state = _offerStates[offerId_];
+    if (state == PrivateTradeOfferState.Consumed) {
       revert PrivateTrade_OfferConsumed(offerId_);
     }
+    if (state == PrivateTradeOfferState.Cancelled) revert PrivateTrade_OfferCancelled(offerId_);
 
     // Effects precede the settlement call. Any downstream revert rolls this transition back.
     _offerStates[offerId_] = PrivateTradeOfferState.Consumed;

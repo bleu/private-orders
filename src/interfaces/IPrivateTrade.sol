@@ -140,8 +140,20 @@ error PrivateTrade_AppDataMismatch(bytes32 makerAppData, bytes32 takerAppData);
 /// @dev Raised when a successful settlement already consumed this offer.
 error PrivateTrade_OfferConsumed(bytes32 offerId);
 
+/// @dev Raised when settlement is attempted after the maker cancelled an offer.
+error PrivateTrade_OfferCancelled(bytes32 offerId);
+
+/// @dev Raised when cancellation is not executed by the maker's order-owning account.
+error PrivateTrade_NotOfferMaker(address expected, address actual);
+
+/// @dev Raised when cancellation loses the race to settlement.
+error PrivateTrade_CannotCancelConsumed(bytes32 offerId);
+
 /// @notice Emitted when an offer is consumed by a successful atomic settlement.
 event PrivateTradeOfferConsumed(bytes32 indexed offerId, address indexed taker);
+
+/// @notice Emitted when the maker cancels an available offer.
+event PrivateTradeOfferCancelled(bytes32 indexed offerId);
 
 /// @notice View of the settlement context a conditional order validates against.
 interface IPrivateTradeWrapper {
@@ -153,4 +165,7 @@ interface IPrivateTradeWrapper {
 
   /// @notice Durable lifecycle state for an offer.
   function offerState(bytes32 offerId) external view returns (PrivateTradeOfferState);
+
+  /// @notice Permanently cancel an available offer. Must be called by its maker account.
+  function cancelOffer(PrivateOffer calldata offer) external;
 }

@@ -4,11 +4,11 @@ Reviewed on 2026-09-14 against `e0069ce17f0bd4d9149309bccde6da592597d9ca`.
 
 ## Verdict
 
-Continue the project as a focused ERC20 bilateral settlement product. Do not release this implementation with real funds yet. The two reproduced contract defects are now covered by passing regression tests: offers are single-use across appData hashes, and each leg is checked against its own clearing prices. The service still has reproducible cross-offer payload confusion and false settlement reporting.
+Continue the project as a focused ERC20 bilateral settlement product. Do not release this implementation with real funds yet. All four reproduced defects are now covered by passing regression tests: offers are single-use across appData hashes, each leg is checked against its own clearing prices, per-offer payloads cannot cross, and settlement requires order, receipt and consumed-state evidence. Cancellation, expiry, retry, recovery and restart are implemented and tested against the real service. What remains unproven is the browser and wallet surface, and no fresh end-to-end run against a real chain has been done for this revision.
 
 The strongest product is a link that lets two known parties execute an agreed swap, inspect readable terms, cancel before execution, and recover cleanly from failure. CoW integration can provide distribution and familiar infrastructure. It does not automatically provide privacy, a business model, or permission to bypass auction rules.
 
-This is a concept, implementation, and release review, not an external security audit. The accompanying contract artifacts now assert the fixes; the service artifacts continue to reproduce unresolved defects.
+This is a concept, implementation, and release review, not an external security audit. The accompanying artifacts assert the fixes; the limits that remain are listed at the end of each blocker rather than dropped.
 
 ## Recovered intent and resume point
 
@@ -66,9 +66,9 @@ The orderbook, autopilot, driver, and custom solver participate in the implement
 | Component | Responsibility | Assessment |
 | --- | --- | --- |
 | `PrivateTradeLib`, `PrivateTradeBuilder` | Derive orders, conditional authorizations, signatures and settlement encoding | Useful shared implementation, but appData is not fixed by the conditional authorization |
-| `PrivateTradeWrapper`, `PrivateTradeOrder` | Enforce paired execution using temporary wrapper context and durable offer state | Replay and independent-price defects remediated locally; cancellation remains unfinished |
+| `PrivateTradeWrapper`, `PrivateTradeOrder` | Enforce paired execution using temporary wrapper context and durable offer state | Replay and independent-price defects remediated locally; cancellation implemented through the owning Shed |
 | CoW Shed, `PrivateTradeAuthoriser` | Owner-signed funding and authorization; enforce own-wallet beneficiary | Valuable protection on the generated bundle path; not a substitute for validating what arbitrary signed calls do |
-| `LinkCompute`, `LinkRelay`, link service | Persist offers, compute signatures, relay and report progress | Functional demo architecture; shared scratch files and lifecycle assumptions are unsafe for multiple offers |
+| `LinkCompute`, `LinkRelay`, link service | Persist offers, compute signatures, relay and report progress | Per-offer artifacts, atomic offer records, explicit lifecycle states, cancellation and recovery; acceptance locking is per process, so a shared store still needs a single writer |
 | Custom sub-solver and browser app | Produce JIT/fulfillment solutions and collect signatures | Demonstrated locally in prior session; not a completed production BYOS integration |
 
 ## Release blockers
@@ -99,33 +99,39 @@ Required outcome: validate actual executed output for each trade using its own p
 
 ### 3. Relay uses the last computed offer instead of the accepted offer
 
-**Reproduced with an extracted-function test and mocked subprocess/filesystem.** `relay(computed, signatures)` never writes `computed` to the file that `LinkRelay.run` reads. Creating offer B overwrites `out-json/link-computed.json`. Later acceptance of offer A writes A's signatures, then invokes the relay against B's computation.
+**Remediated locally.** `LinkCompute`, `LinkRelay`, `LinkCancel` and `Withdraw` take their input and output paths from the environment, and every invocation gets a private directory it alone writes. The service's typed-data checks, development signing, probes and wallet diagnostics do the same. Offer records are written to a temporary file and renamed, so no reader sees a partial record, and the sub-solver's copy is published the same way.
 
-Signature checks usually turn this into a failure rather than unauthorized payment, but it makes normal multi-offer use unreliable. It needs no simultaneous JavaScript execution. A sequential A-create, B-create, A-accept sequence suffices. Withdrawal computation has a similar globally shared plan file.
+Original finding, kept as the record of the review: `relay(computed, signatures)` never wrote `computed` to the file that `LinkRelay.run` reads. Creating offer B overwrote `out-json/link-computed.json`. Later acceptance of offer A wrote A's signatures, then invoked the relay against B's computation.
 
-Sources: `link-service/server.mjs:113`, `:120`, `:711`; `script/LinkRelay.s.sol:34`; withdrawal paths at `server.mjs:224` and `:620`. Proof: `docs/review/service-counterexamples.mjs`.
+Signature checks usually turned this into a failure rather than unauthorized payment, but it made normal multi-offer use unreliable. It needed no simultaneous JavaScript execution: a sequential A-create, B-create, A-accept sequence was enough. Withdrawal computation had a similar globally shared plan file.
 
-Required outcome: immutable per-offer computed payloads and per-attempt files or structured inputs; acceptance and withdrawal must execute exactly the signed plan. Test interleaved offers and restart recovery.
+Proof: `docs/review/service-counterexamples.mjs` relays offer A while offer B is on disk. `docs/review/service-lifecycle.mjs` runs two service instances over one store and interleaves 48 signature checks; restoring the shared path fails that check with one instance reading another's typed data.
+
+Required outcome, met for a single writer: immutable per-offer computed payloads and per-attempt files, with acceptance and withdrawal executing exactly the signed plan. Two instances sharing a store can still lose an update to one offer record; that needs a store-level lock or a single writer.
+
+Sources: `link-service/server.mjs:121`, `:141`, `:160`; `script/LinkRelay.s.sol:34`.
 
 ### 4. A balance decrease is reported as settlement
 
-**Reproduced with the real status function and mocked chain/orderbook responses.** `status` reports `settled` whenever the maker Shed's sell-token balance drops below its acceptance baseline. With an open order and no settlement transaction, an unrelated withdrawal produces a successful status. The receipt can then say that a transaction was not found.
+**Remediated locally.** `status` no longer reads balances. `settled` requires all three of: the intended order is fulfilled, its settlement transaction has a successful receipt, and the wrapper reports the offer consumed. `settling` is returned while any of the three is missing, with each piece of evidence reported separately.
 
-Source: `link-service/server.mjs:371`. Proof: `docs/review/service-counterexamples.mjs`.
+Original finding, kept as the record of the review: `status` reported `settled` whenever the maker Shed's sell-token balance dropped below its acceptance baseline. With an open order and no settlement transaction, an unrelated withdrawal produced a successful status, and the receipt could then say that a transaction was not found.
 
-Required outcome: derive execution from the intended order UID and successful transaction/trade evidence, with explicit pending, cancelled, expired, failed, and confirmation states. Balance changes can supplement evidence, not replace it. A successful transaction and chain finality are also different states.
+Proof: `docs/review/service-counterexamples.mjs`, plus the `settled requires a fulfilled order, a successful receipt, and consumed wrapper state` case in `docs/review/service-lifecycle.mjs`, which walks the four states through the real HTTP endpoint.
+
+Required outcome, met: execution is derived from the intended order UID and successful transaction evidence, with explicit pending, cancelled, expired, failed and confirmation states. Balance changes no longer substitute for evidence. Chain finality remains a separate, unimplemented state.
+
+Source: `link-service/server.mjs:462`.
 
 ### 5. Funding, retries, cancellation and open acceptance do not form a complete lifecycle
 
-**Source-verified.** Funding and settlement are different transactions. `LinkRelay.run` performs permits before checking whether bundle nonces were consumed. After an EIP-2612-funded bundle spends its allowance, a retry tries the consumed permit again and fails the allowance check before reaching the nonce skip. An orderbook error after successful funding leaves exactly this recovery problem. The historical submitter retry test exercises a different path and does not prove service retry safety.
+**Remediated locally for the supported path.** Cancellation exists end to end: the maker signs a bundle that removes its ComposableCoW authorization and marks the offer cancelled in the wrapper in one transaction, and `cancelOffer` refuses a maker mismatch and refuses to cancel a consumed offer. The relay skips a Shed whose bundle nonce is already spent before touching its permit, so a retry after partial funding converges. Acceptance records a phase, returns `recovery_available` with the reason when funding succeeds but publishing or posting fails, and refuses a second in-flight acceptance in the same process. Expiry is reported as `expired` rather than `open`. Open offers were removed: a concrete taker address is required, which is the first supported mode the finding recommended.
 
-An open offer is also not implemented correctly. `LinkCompute._terms` maps a zero taker through `proxyOf(0)` rather than preserving the open-offer sentinel. Acceptance changes the taker and recomputes terms, expiry and salt while retaining the maker's old signature. Even the contract open-offer test chooses the taker before authorizing the maker; it does not prove “maker signs once, unknown taker accepts later.”
+Original finding, kept as the record of the review: funding and settlement are different transactions, and `LinkRelay.run` performed permits before checking whether bundle nonces were consumed, so a retry after an EIP-2612-funded bundle spent its allowance failed the allowance check before reaching the nonce skip. An orderbook error after successful funding left exactly that recovery problem. An open offer was not implemented correctly either: `LinkCompute._terms` mapped a zero taker through `proxyOf(0)` rather than preserving the open-offer sentinel, and acceptance recomputed terms, expiry and salt while retaining the maker's old signature. There was no cancellation route or UI, despite cancellation being in the original MVP, and withdrawal was shown only after the UI decided a trade settled.
 
-There is no cancellation route or UI, despite cancellation being in the original MVP. `ComposableCoW.remove` exists upstream, but the app has not connected revocation, unused signed bundle invalidation, and recovery. Withdrawal is shown only after the UI decides a trade settled, although failed funded offers also need recovery.
+Proof: `test_makerCancellationAtomicallyRevokesOrderAndOffer` through a real CoW Shed bundle, `test_bundleNonceCannotBeReplayed`, and the lifecycle suite in `docs/review/service-lifecycle.mjs` covering duplicate and simultaneous acceptance, post-order failure with recovery, retry convergence, restart, expiry and cancellation.
 
-Sources: `script/LinkRelay.s.sol:38`, `:64`, `:131`; `link-service/server.mjs:678`, `:683`, `:720`; `script/LinkCompute.s.sol:307`; `link-service/page.mjs:301`; `lib/composable-cow/src/ComposableCoW.sol:150`.
-
-Required outcome: define and test the full lifecycle, including failure after either party funds, orderbook timeout after acceptance, duplicate acceptance, expiry, cancellation racing settlement, service restart, and funds recovery. Keep restricted offers as the first supported mode if open acceptance needs a separate authorization design.
+Required outcome: met for a restricted offer driven by one service process. Open acceptance still needs its own authorization design before it can be enabled, and a multi-instance deployment needs a store-level acceptance lock.
 
 ## Additional material gaps
 
@@ -134,7 +140,7 @@ Required outcome: define and test the full lifecycle, including failure after ei
 | Confidentiality | Posted taker appData ABI-encodes both parties' terms, including beneficiary wallets. Its ERC-1271 payload also includes full terms. The maker has no separate orderbook entry, but its information is disclosed. Role reads trust an unsigned `address` query. | An explicit threat model and either a private submission path or accurate disclosure to users. See `LinkCompute.s.sol:278`, `PrivateTradeAppData.sol:49`, `server.mjs:554`. |
 | Wallet and token support | The app always runs the permit-signing flow. When typed data is unavailable it uses `personal_sign` on a raw permit digest, which adds a different signing envelope. It has no functional approve transaction flow. DAI-style `allowed=true` grants an unlimited allowance, unlike the amount-limited UI description. Contract-owner signatures are restricted by local ECDSA/65-byte handling. | Named supported wallets and token contracts, real permit and approve-path tests, truthful allowance display, chain checks, and a deliberate smart-wallet/Safe story. See `page.mjs:423`, `TokenPermit.sol:97`, `server.mjs:655`. |
 | Browser trust | Token symbols and error strings enter `innerHTML` templates without escaping. Arbitrary token metadata can therefore become markup on a signing page. `createChecked` validates the generated helper call; it cannot protect users who sign arbitrary malicious calls from a compromised page. | Render untrusted values as text, validate complete signing requests, and test malicious metadata. See `page.mjs:110`, `:245`, `:256`; `server.mjs:353`. |
-| Service robustness | Synchronous Forge/RPC calls block the HTTP process; there is no durable transaction/job state, acceptance lock, robust expiry handling, or bounded operational queue. Offer links use only 40 bits of the offer hash, and repeated identical creation within a block can overwrite an existing record because salt derives from timestamp. Sub-solver solutions all use id `0`. | Multi-offer and restart tests, unique stable IDs, authenticated sensitive reads, bounded resource use, unique solution IDs, and operational limits. See `server.mjs:120`, `:523`; `LinkCompute.s.sol:317`; `private-trade-solver.mjs:81`. |
+| Service robustness | Synchronous Forge/RPC calls block the HTTP process, acceptance locking is per process rather than per store, and there is no durable job queue or bounded operational queue. Sub-solver solutions all use id `0`. Fixed since the review: offers use a 128-bit random bearer id, so repeated identical creation no longer overwrites a record; records and sub-solver files are written atomically; expiry is reported; and multi-offer and restart behaviour is tested. | Authenticated sensitive reads, bounded resource use and unique solution IDs. A store-level acceptance lock or a single writer is required before running two instances over one store. See `server.mjs:102`, `:624`; `subsolver/private-trade-solver.mjs:81`. |
 | Release proof | The app browser test uses development wallets and tests one restricted pair. It checks received balances increased, not exact four-way deltas. CI runs Foundry only. Existing tests are useful but do not cover the reproduced defects. | Exact debit/credit assertions, extension-wallet runs, application regression tests, independent contract review, staging approval, and production configuration evidence. See `scripts/app-e2e.mjs`, `.github/workflows/test.yml`. |
 
 ## BYOS and primary-document assessment
@@ -163,28 +169,30 @@ My recommendation is to keep the useful contract structure, fix the invalid guar
 
 ## Verification performed
 
-| Check | Result on reviewed revision | Limit |
-| --- | --- | --- |
-| `forge test` | 51 passed, 0 failed, 2 skipped | Fork and offline suites require configuration |
-| `FORK_RPC=https://ethereum-rpc.publicnode.com forge test --match-path 'test/fork/*' -vv` | 5 passed | Local fork with funded accounts and impersonated allowlisting; no production writes |
-| `forge fmt --check` | Passed | Formatting only |
-| `node scripts/check-page.mjs` | Both generated page scripts parse | No browser-wallet compatibility proof |
-| `bash docs/review/run-counterexamples.sh` | Two contract regressions pass; two service counterexamples remain reproduced | Contract tests execute actual local GPv2 code. Service checks mock external boundaries and execute extracted existing functions. |
+Recorded per revision, because "the tests pass" means different things before and after the fixes.
 
-The contract review cases now pass only when the exploit attempts revert and protocol balances remain isolated. The service cases still print `REPRODUCED` while those defects remain. Run them with `bash docs/review/run-counterexamples.sh`. The runner copies source/tests into a temporary directory and does not broadcast transactions.
+| Check | At review | After the fixes in this report | Limit |
+| --- | --- | --- | --- |
+| `forge test` | 51 passed, 0 failed, 2 skipped | 59 passed, 0 failed, 1 skipped | Fork and offline suites require configuration |
+| `FORK_RPC=https://ethereum-rpc.publicnode.com forge test --match-path 'test/fork/*' -vv` | 5 passed | 5 passed | Local fork with funded accounts and impersonated allowlisting; no production writes |
+| `forge fmt --check` | Passed | Passed | Formatting only |
+| `node scripts/check-page.mjs` | Both generated page scripts parse | Both parse | No browser-wallet compatibility proof |
+| `bash docs/review/run-counterexamples.sh` | Two contract regressions pass; two service counterexamples remain reproduced | Two contract regressions pass, three service counterexamples pass as regressions, and 9 lifecycle checks pass | Contract tests execute actual local GPv2 code. Service checks replace `forge`, `cast` and the orderbook at their boundaries and drive the real HTTP handler. |
 
-The isolated counterexample build also reports two existing unused-parameter warnings in `PrivateTradeBuilder.wrapperData`. The service check initially needed missing mock globals supplied; its final checked-in version runs successfully. These were test-fixture errors, not application failures.
+The contract cases pass only when the exploit attempts revert and protocol balances remain isolated. The service cases now assert the fixed behaviour instead of reproducing the defect: `docs/review/service-counterexamples.mjs` pins per-offer artifacts, evidence-based settlement and the relay's use of the accepted offer, and `docs/review/service-lifecycle.mjs` drives interleaving, two instances over one store, restart, duplicate and simultaneous acceptance, post-order failure with recovery, expiry, cancellation and the settlement evidence chain over real HTTP. Each was checked against the pre-fix code and fails there. Run them with `bash docs/review/run-counterexamples.sh`. The runner copies source and tests into a temporary directory and broadcasts nothing.
 
-The offline orderbook and link service were not listening on ports 8080 and 9200. The previous Pi app success remains historical evidence, not a fresh app result. This review did not restart or overwrite the shared offline stack. The external Grok exploration lanes were unavailable and the configured Claude synthesis model returned an access/model error. Native agents recovered the transcript and checked documentation claims; this report does not claim a completed multi-provider security review.
+The isolated counterexample build reports two unused-parameter warnings in `PrivateTradeBuilder.wrapperData`.
 
-The Prove It Works principle changed the review method: passing tests were followed by executable attempts to disprove the guarantees. It produced four concrete counterexamples instead of a readiness verdict based only on the prior agent's report.
+The offline orderbook and link service were not listening on ports 8080 and 9200, and Docker was not running, so the app and link-service e2e scripts were not re-run for this revision. That remains the largest unverified surface: no fresh browser run and no fresh end-to-end settlement against a real chain. The external Grok exploration lanes were unavailable and the configured Claude synthesis model returned an access/model error. Native agents recovered the transcript and checked documentation claims; this report does not claim a completed multi-provider security review.
+
+The Prove It Works principle changed the review method: passing tests were followed by executable attempts to disprove the guarantees. It produced four concrete counterexamples instead of a readiness verdict based only on the prior agent's report, and the lifecycle suite is the same treatment applied to the fixes.
 
 ## Continuation and acceptance gates
 
-1. Complete cancellation around the new offer lifecycle state, then make service plans immutable per offer and replace balance-only settlement inference with order and receipt evidence.
-2. Make signed payloads immutable per offer and implement durable lifecycle/recovery. Test two interleaved offers, consumed permit retries, post-order timeouts, concurrent acceptance, restart, cancellation and expiry. Settlement must require exact order/transaction evidence.
+1. ~~Complete cancellation around the new offer lifecycle state, then make service plans immutable per offer and replace balance-only settlement inference with order and receipt evidence.~~ Met. See blockers 3, 4 and 5.
+2. ~~Make signed payloads immutable per offer and implement durable lifecycle/recovery. Test two interleaved offers, consumed permit retries, post-order timeouts, concurrent acceptance, restart, cancellation and expiry. Settlement must require exact order/transaction evidence.~~ Met for one service process over one store, tested by `docs/review/service-lifecycle.mjs`. A store-level acceptance lock remains open for a multi-instance deployment.
 3. Agree the production submission contract with CoW/BYOS. Document privacy, operator identity, fee payer, signature admission, scoring, attribution, supported infrastructure flags and staging allowlisting. Demonstrate one pair on that actual path before claiming BYOS support.
 4. Finish a restricted ERC20 desktop beta. Use named standard tokens, readable decimal inputs, safe metadata rendering, real wallet signing, a working approval fallback, cancellation and recovery. Prove exact wallet debits/credits and no residual unexpected funds. Open acceptance requires its own proof before enabling it.
 5. Obtain independent audit/remediation and staging evidence, measure the complete transaction cost, and test demand with intended users. Production approval and operations follow those results. Mobile, NFTs and off-chain game items remain outside this release.
 
-Next engineering action: turn `test_sameAuthorizationSettlesAgainWithDifferentAppData` into a failing regression against an explicit single-use offer requirement, then implement the smallest correct enforcement. Cosmetic wallet work should not precede that fix.
+Next engineering action: start gate 4 on the contract side — render untrusted token metadata as text, gate signing on chain and account, and report the allowance a permit actually grants — then re-run the app and link-service e2e against the offline stack, which is the only remaining evidence this revision has not reproduced.

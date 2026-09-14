@@ -81,6 +81,8 @@ contract LinkCompute is Script {
     json = string.concat(json, '","validTo":', vm.toString(uint256(terms.offer.validTo)));
     json = string.concat(json, ',"makerBundle":');
     json = string.concat(json, _side(request, terms, makerParams, makerShed, true));
+    json = string.concat(json, ',"makerCancellation":');
+    json = string.concat(json, _cancellation(request, terms, makerParams, makerShed));
     json = string.concat(json, ',"takerBundle":');
     // The taker's Shed owns their order; the taker EOA only signs the bundle.
     json = string.concat(json, _side(request, terms, takerParams, terms.taker, false));
@@ -94,8 +96,30 @@ contract LinkCompute is Script {
     json = string.concat(json, '":"', vm.toString(PrivateTradeBuilder.clearingPrices(terms)[1]));
     json = string.concat(json, '"}}\n');
 
-    vm.writeFile("out-json/link-computed.json", json);
+    vm.writeFile(vm.envOr("LINK_COMPUTED_FILE", string("out-json/link-computed.json")), json);
     console.log("offerId", vm.toString(PrivateTradeLib.offerId(terms.offer)));
+  }
+
+  function _cancellation(
+    Request memory request,
+    PrivateTradeTerms memory terms,
+    IConditionalOrder.ConditionalOrderParams memory makerParams,
+    address makerShed
+  ) private view returns (string memory json) {
+    bytes32 nonce = keccak256(abi.encode("cancel", terms.offer.salt));
+    uint256 deadline = block.timestamp + request.validFor;
+    Call[] memory calls = ShedBundle.cancellationCalls(request.composableCoW, makerParams, request.wrapper, terms.offer);
+
+    json = string.concat('{"owner":"', vm.toString(request.maker));
+    json = string.concat(json, '","shed":"', vm.toString(makerShed));
+    json = string.concat(json, '","nonce":"', vm.toString(nonce));
+    json = string.concat(json, '","deadline":', vm.toString(deadline));
+    json = string.concat(json, _jsonCalls(calls));
+    json = string.concat(
+      json, ',"bundleTypedData":', ShedBundle.typedData(request.shedFactory, makerShed, calls, nonce, deadline)
+    );
+    json = string.concat(json, ',"digest":"');
+    json = string.concat(json, vm.toString(_digest(request, makerShed, calls, nonce, deadline)), '"}');
   }
 
   /// @dev One party's signed hook bundle: the calls, and the digest to sign.
@@ -324,7 +348,7 @@ contract LinkCompute is Script {
   }
 
   function _request() private view returns (Request memory request) {
-    string memory json = vm.readFile("out-json/link-request.json");
+    string memory json = vm.readFile(vm.envOr("LINK_REQUEST_FILE", string("out-json/link-request.json")));
     request.maker = vm.parseJsonAddress(json, ".maker");
     request.allowedTaker = vm.parseJsonAddress(json, ".taker");
     request.sellToken = vm.parseJsonAddress(json, ".sellToken");

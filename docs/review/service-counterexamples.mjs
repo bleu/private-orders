@@ -8,21 +8,44 @@ const statusFn = source.slice(
   source.indexOf('async function status(offer)'),
   source.indexOf('/// What a party must do before signing.'),
 );
+let orderResult = { status: 'open' };
+let txResult = null;
+let receiptResult = null;
+let chainState = 'available';
 const statusContext = {
-  balanceOf: () => '0',
-  settlementTx: async () => null,
-  orderStatus: async () => ({ status: 'open' }),
+  settlementTx: async () => txResult,
+  orderStatus: async () => orderResult,
+  wrapperOfferState: () => chainState,
+  transactionReceipt: () => receiptResult,
+  receiptSucceeded: (receipt) => receipt?.status === '0x1',
 };
 vm.createContext(statusContext);
 vm.runInContext(statusFn + '\nthis.run = status;', statusContext);
 const result = await statusContext.run({
   orderUid: 'unfilled-order',
-  computed: { sellToken: 'token', makerShed: 'shed' },
+  computed: { sellToken: 'token', makerShed: 'shed', validTo: String(Math.floor(Date.now() / 1000) + 3600) },
   makerBalanceAtAccept: '100',
 });
-assert.equal(result.status, 'settled');
+assert.equal(result.status, 'settling');
 assert.equal(result.settlementTx, null);
-console.log('REPRODUCED: a withdrawn balance reports settled while the order remains open and has no transaction');
+console.log('REGRESSION: a withdrawn balance cannot report settlement without order and receipt evidence');
+
+orderResult = { status: 'fulfilled' };
+txResult = '0xtransaction';
+chainState = 'consumed';
+const missingReceipt = await statusContext.run({
+  orderUid: 'fulfilled-order',
+  computed: { offerId: '0xoffer', validTo: String(Math.floor(Date.now() / 1000) + 3600) },
+});
+assert.equal(missingReceipt.status, 'settling');
+
+receiptResult = { status: '0x1', blockNumber: '0x10' };
+const proven = await statusContext.run({
+  orderUid: 'fulfilled-order',
+  computed: { offerId: '0xoffer', validTo: String(Math.floor(Date.now() / 1000) + 3600) },
+});
+assert.equal(proven.status, 'settled');
+console.log('REGRESSION: fulfilled requires matching transaction, successful receipt, and consumed wrapper state');
 
 const relayFn = source.slice(source.indexOf('function relay(computed, signatures)'), source.indexOf('const PROBE_DOMAIN'));
 const files = new Map([['/fixture/out-json/link-computed.json', JSON.stringify({ offerId: 'B' })]]);
@@ -35,14 +58,15 @@ const relayContext = {
   path,
   process: { env: {} },
   CONFIG: { relayerKey: 'mock' },
-  fs: { writeFileSync: (file, value) => files.set(file, value) },
-  execFileSync: () => {
-    observed = JSON.parse(files.get('/fixture/out-json/link-computed.json'));
+  attemptFiles: () => '/fixture/attempt',
+  fs: { writeFileSync: (file, value) => files.set(file, value), rmSync: () => {} },
+  execFileSync: (_command, _args, options) => {
+    observed = JSON.parse(files.get(options.env.LINK_COMPUTED_FILE));
     return Buffer.from('bundles relayed');
   },
 };
 vm.createContext(relayContext);
 vm.runInContext(relayFn + '\nthis.run = relay;', relayContext);
 relayContext.run({ offerId: 'A' }, { maker: 'maker-A', taker: 'taker-A' });
-assert.equal(observed.offerId, 'B');
-console.log('REPRODUCED: relaying offer A invokes Forge with the previously computed offer B');
+assert.equal(observed.offerId, 'A');
+console.log('REGRESSION: relaying offer A materializes and invokes Forge with offer A');

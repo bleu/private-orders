@@ -8,7 +8,9 @@
 **Goal**: Give every offer immutable per-offer artifacts and an explicit lifecycle with retry, cancellation, expiry, failure, and recovery.
 **Success Criteria**: Interleaved offers cannot cross; retries converge; status requires order and transaction evidence; cancellation runs through the owning Shed.
 **Tests**: Interleaved offers, service restart, consumed permit, post-order failure, duplicate acceptance, cancellation race, expiry, failed funded offer withdrawal.
-**Status**: Not Started
+**Status**: Complete
+
+Proved by `docs/review/service-lifecycle.mjs` (9 checks over the real HTTP surface with a fake chain and orderbook) and the existing Solidity suites. Two defects were found and fixed while building it: every typed-data check shared `out-json/verify.json`, so two service instances over one store could verify each other's messages, and a second acceptance arriving during the first one's order round trip relayed and posted again. The acceptance lock is per process; a store-level lock is still open for multi-instance deployment.
 
 ## Stage 3: Wallet and browser safety
 **Goal**: Support honest ERC20 signing and funding flows without unsafe rendering or false allowance claims.

@@ -21,6 +21,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 
 import { render, renderCreate } from './page.mjs';
@@ -97,9 +98,36 @@ const readBody = (req) =>
     });
   });
 
+/// Offers with an acceptance running in this process. See the guard in the accept handler.
+const accepting = new Set();
+
 const offerPath = (id) => path.join(STORE, `${id}.json`);
 const loadOffer = (id) => (fs.existsSync(offerPath(id)) ? JSON.parse(fs.readFileSync(offerPath(id), 'utf8')) : null);
-const saveOffer = (offer) => fs.writeFileSync(offerPath(offer.id), JSON.stringify(offer, null, 2));
+const saveOffer = (offer) => {
+  const target = offerPath(offer.id);
+  const temporary = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(offer, null, 2));
+  fs.renameSync(temporary, target);
+};
+
+function attemptFiles(kind) {
+  return fs.mkdtempSync(path.join(STORE, `.${kind}-`));
+}
+
+/// Run one `cast`/`forge` call against its own private file, and clean up after it.
+///
+/// Every invocation that hands a file to `cast` or `forge` goes through here: a fixed path is how
+/// two offers interleaved in this process end up verifying or signing each other's messages.
+function withScratch(kind, name, contents, run) {
+  const directory = attemptFiles(kind);
+  const file = path.join(directory, name);
+  fs.writeFileSync(file, contents);
+  try {
+    return run(file);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
 
 function forge(args) {
   return execFileSync('forge', args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -111,15 +139,31 @@ function cast(args) {
 
 /// Ask the Solidity builder to derive the whole payload. No private key, no transaction.
 function compute(request) {
-  fs.writeFileSync(path.join(ROOT, 'out-json', 'link-request.json'), JSON.stringify(request, null, 2));
-  forge(['script', 'script/LinkCompute.s.sol', '--rpc-url', RPC, '-q']);
-  return JSON.parse(fs.readFileSync(path.join(ROOT, 'out-json', 'link-computed.json'), 'utf8'));
+  const directory = attemptFiles('compute');
+  const requestFile = path.join(directory, 'request.json');
+  const computedFile = path.join(directory, 'computed.json');
+  fs.writeFileSync(requestFile, JSON.stringify(request, null, 2));
+  try {
+    execFileSync('forge', ['script', 'script/LinkCompute.s.sol', '--rpc-url', RPC, '-q'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, LINK_REQUEST_FILE: requestFile, LINK_COMPUTED_FILE: computedFile },
+    });
+    return JSON.parse(fs.readFileSync(computedFile, 'utf8'));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 /// Relay both owner-signed bundles. Permissionless, and safe to retry.
 function relay(computed, signatures) {
+  const directory = attemptFiles('relay');
+  const computedFile = path.join(directory, 'computed.json');
+  const signaturesFile = path.join(directory, 'signatures.json');
+  fs.writeFileSync(computedFile, JSON.stringify(computed, null, 2));
   fs.writeFileSync(
-    path.join(ROOT, 'out-json', 'link-signatures.json'),
+    signaturesFile,
     JSON.stringify(
       {
         maker: signatures.maker,
@@ -137,12 +181,23 @@ function relay(computed, signatures) {
     out = execFileSync(
       'forge',
       ['script', 'script/LinkRelay.s.sol', '--rpc-url', RPC, '--broadcast'],
-      { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, RELAYER_PRIVATE_KEY: CONFIG.relayerKey } },
+      {
+        cwd: ROOT,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          RELAYER_PRIVATE_KEY: CONFIG.relayerKey,
+          LINK_COMPUTED_FILE: computedFile,
+          LINK_SIGNATURES_FILE: signaturesFile,
+        },
+      },
     ).toString();
   } catch (err) {
     // The relay already says why in one line. Everything around it is the command that failed and
     // forge's build notices, which is noise to whoever is holding the link.
     throw new Error(relayReason(String(err.stderr ?? err.message ?? '')));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 
   // The relay's own lines, returned so a caller can see what happened without reading a log file.
@@ -206,9 +261,9 @@ function probes() {
 /// a plain message is prefixed exactly as `personal_sign` prefixes it.
 function devSign(key, { typedData, message }) {
   if (typedData) {
-    const file = path.join(ROOT, 'out-json', 'dev-typed-data.json');
-    fs.writeFileSync(file, JSON.stringify(typedData));
-    return cast(['wallet', 'sign', '--data', '--from-file', file, '--private-key', key]).trim();
+    return withScratch('dev-sign', 'typed-data.json', JSON.stringify(typedData), (file) =>
+      cast(['wallet', 'sign', '--data', '--from-file', file, '--private-key', key]).trim(),
+    );
   }
   return cast(['wallet', 'sign', '--private-key', key, String(message)]).trim();
 }
@@ -225,8 +280,11 @@ function addressRole(offer, who) {
 /// returns the plan — including `empty: true` when there is nothing to move.
 function withdrawPlan(offer, role) {
   const side = role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
+  const directory = attemptFiles('withdraw');
+  const requestFile = path.join(directory, 'request.json');
+  const computedFile = path.join(directory, 'computed.json');
   fs.writeFileSync(
-    path.join(ROOT, 'out-json', 'withdraw-request.json'),
+    requestFile,
     JSON.stringify(
       {
         shedFactory: CONFIG.shedFactory,
@@ -239,10 +297,17 @@ function withdrawPlan(offer, role) {
       2,
     ),
   );
-  execFileSync('forge', ['script', 'script/Withdraw.s.sol', '--rpc-url', RPC], { cwd: ROOT, stdio: 'pipe' });
-  const plan = JSON.parse(fs.readFileSync(path.join(ROOT, 'out-json', 'withdraw-computed.json'), 'utf8'));
-  if (plan.empty) return { empty: true, shed: side.shed };
-  return { ...plan, shed: side.shed, role };
+  try {
+    execFileSync('forge', ['script', 'script/Withdraw.s.sol', '--rpc-url', RPC], {
+      cwd: ROOT,
+      stdio: 'pipe',
+      env: { ...process.env, WITHDRAW_REQUEST_FILE: requestFile, WITHDRAW_COMPUTED_FILE: computedFile },
+    });
+    const plan = JSON.parse(fs.readFileSync(computedFile, 'utf8'));
+    return plan.empty ? { empty: true, shed: side.shed } : { ...plan, shed: side.shed, role };
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 /// Does this signature belong to `address` over this exact typed data?
@@ -251,14 +316,14 @@ function withdrawPlan(offer, role) {
 /// caller can tell "verified false" apart from "not checked".
 function verifies(typedData, signature, address) {
   if (!typedData || !/^0x[0-9a-fA-F]{130}$/.test(signature ?? '')) return null;
-  const file = path.join(ROOT, 'out-json', 'verify.json');
-  fs.writeFileSync(file, JSON.stringify(typedData));
-  const res = spawnSync(
-    'cast',
-    ['wallet', 'verify', '--address', address, '--data', '--from-file', file, signature],
-    { encoding: 'utf8' },
-  );
-  return res.status === 0;
+  return withScratch('verify', 'typed-data.json', JSON.stringify(typedData), (file) => {
+    const res = spawnSync(
+      'cast',
+      ['wallet', 'verify', '--address', address, '--data', '--from-file', file, signature],
+      { encoding: 'utf8' },
+    );
+    return res.status === 0;
+  });
 }
 
 /// Check a party's signatures before anything is relayed.
@@ -348,6 +413,32 @@ async function orderStatus(uid) {
   }
 }
 
+function wrapperOfferState(offerId) {
+  if (!CONFIG.wrapper || !offerId) return 'unknown';
+  try {
+    const value = Number(
+      cast(['call', CONFIG.wrapper, 'offerState(bytes32)(uint8)', offerId, '--rpc-url', RPC]).split(' ')[0],
+    );
+    return ['available', 'consumed', 'cancelled'][value] ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function transactionReceipt(txHash) {
+  if (!txHash) return null;
+  try {
+    return JSON.parse(cast(['receipt', txHash, '--rpc-url', RPC, '--json']));
+  } catch {
+    return null;
+  }
+}
+
+const receiptSucceeded = (receipt) => {
+  const status = receipt?.status;
+  return status === 1 || status === '1' || status === '0x1';
+};
+
 /// Symbol and decimals, read once per token and kept on the offer. Raw amounts are unreadable —
 /// `100000000` is not a price — and a client should never be the one to guess a token's decimals.
 function tokenMeta(offer, token) {
@@ -369,19 +460,29 @@ const balanceOf = (token, holder) =>
 
 /// The offer's progress, derived from the chain rather than from the service's own bookkeeping.
 async function status(offer) {
-  if (!offer.orderUid) return { status: offer.makerSigned && offer.takerSigned ? 'signed' : 'open' };
-
-  const current = balanceOf(offer.computed.sellToken, offer.computed.makerShed);
-  const baseline = BigInt(offer.makerBalanceAtAccept ?? current);
-  if (BigInt(current) < baseline) {
-    return { status: 'settled', orderUid: offer.orderUid, settlementTx: await settlementTx(offer.orderUid) };
+  const wrapperState = wrapperOfferState(offer.computed?.offerId);
+  if (wrapperState === 'cancelled') return { status: 'cancelled', wrapperState };
+  if (!offer.orderUid) {
+    const expired = Number(offer.computed?.validTo ?? 0) * 1000 < Date.now();
+    const phase = offer.acceptance?.phase;
+    const pendingStatus = phase === 'failed' ? 'recovery_available' : phase ? phase : offer.signatures?.maker && offer.signatures?.taker ? 'signed' : 'open';
+    return { status: expired ? 'expired' : pendingStatus, wrapperState, error: phase === 'failed' ? offer.acceptance.error : undefined };
   }
+
   const order = await orderStatus(offer.orderUid);
-  const settled = order.status === 'fulfilled';
+  const txHash = order.status === 'fulfilled' ? await settlementTx(offer.orderUid) : null;
+  const receipt = transactionReceipt(txHash);
+  const settled = order.status === 'fulfilled' && txHash && receiptSucceeded(receipt) && wrapperState === 'consumed';
   return {
     status: settled ? 'settled' : 'settling',
     orderUid: offer.orderUid,
-    settlementTx: settled ? await settlementTx(offer.orderUid) : null,
+    settlementTx: txHash,
+    wrapperState,
+    evidence: {
+      orderStatus: order.status ?? 'unknown',
+      receiptSucceeded: receipt ? receiptSucceeded(receipt) : null,
+      blockNumber: receipt?.blockNumber ?? null,
+    },
   };
 }
 
@@ -458,15 +559,16 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && parts[0] === 'probes') {
       const body = await readBody(req);
       const results = body.signatures.map(({ name, signature, typedData }) => {
-        const file = path.join(ROOT, 'out-json', 'probe.json');
-        fs.writeFileSync(file, JSON.stringify(typedData));
-        const res2 = spawnSync(
-          'cast',
-          ['wallet', 'verify', '--address', body.address, '--data', '--from-file', file, signature],
-          { encoding: 'utf8' },
-        );
-        console.log('probe', name, res2.status === 0 ? 'OK' : 'FAIL', signature);
-        return { name, ok: res2.status === 0 };
+        const ok = withScratch('probe', 'typed-data.json', JSON.stringify(typedData), (file) => {
+          const res2 = spawnSync(
+            'cast',
+            ['wallet', 'verify', '--address', body.address, '--data', '--from-file', file, signature],
+            { encoding: 'utf8' },
+          );
+          return res2.status === 0;
+        });
+        console.log('probe', name, ok ? 'OK' : 'FAIL', signature);
+        return { name, ok };
       });
       return json(res, 200, { address: body.address, results });
     }
@@ -476,21 +578,17 @@ const server = http.createServer(async (req, res) => {
     // a distinction no amount of guesswork about typed-data encodings can make.
     if (req.method === 'POST' && parts[0] === 'wallet-check') {
       const body = await readBody(req);
-      const file = path.join(ROOT, 'out-json', 'wallet-check.json');
-      fs.writeFileSync(file, JSON.stringify(body, null, 2));
-      const out = execFileSync(
-        'forge',
-        ['script', 'script/Diagnose.s.sol', '--rpc-url', RPC],
-        {
+      const out = withScratch('wallet-check', 'submitted.json', JSON.stringify(body, null, 2), (file) =>
+        execFileSync('forge', ['script', 'script/Diagnose.s.sol', '--rpc-url', RPC], {
           cwd: ROOT,
           encoding: 'utf8',
           env: {
             ...process.env,
             DIAG_MESSAGE: body.message,
-            DIAG_SIG_FILE: 'out-json/wallet-check.json',
+            DIAG_SIG_FILE: file,
             COMPOSABLE_COW_ADDRESS: CONFIG.composableCoW ?? '',
           },
-        },
+        }),
       );
       const recovered = (out.match(/recovered (0x[0-9a-fA-F]{40})/) ?? [])[1] ?? null;
       console.log('wallet-check', body.address, 'recovered', recovered, 'chainId', body.chainId, body.signature);
@@ -503,10 +601,13 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && parts[0] === 'offers' && parts.length === 1) {
       const body = await readBody(req);
+      if (!/^0x[0-9a-fA-F]{40}$/.test(body.taker ?? '') || /^0x0{40}$/i.test(body.taker)) {
+        return json(res, 400, { error: 'a concrete taker address is required for this beta' });
+      }
       // Explicitly enumerated: CONFIG also holds the relayer key, and this object is written to disk.
       const request = {
         maker: body.maker,
-        taker: body.taker ?? '0x0000000000000000000000000000000000000000',
+        taker: body.taker,
         sellToken: body.sellToken,
         sellAmount: String(body.sellAmount),
         buyToken: body.buyToken,
@@ -520,12 +621,15 @@ const server = http.createServer(async (req, res) => {
         authoriser: CONFIG.authoriser,
       };
       const computed = compute(request);
-      const id = computed.offerId.slice(2, 12);
+      const id = crypto.randomBytes(16).toString('hex');
+      const computedHash = `0x${crypto.createHash('sha256').update(JSON.stringify(computed)).digest('hex')}`;
 
       const offer = {
+        schemaVersion: 2,
         id,
         request,
         computed,
+        computedHash,
         createdAt: new Date().toISOString(),
         signatures: {},
         permits: {},
@@ -534,6 +638,8 @@ const server = http.createServer(async (req, res) => {
 
       return json(res, 201, {
         id,
+        offerId: computed.offerId,
+        computedHash,
         link: `${PUBLIC_URL}/o/${id}`,
         funding: funding(computed, 'maker'),
         permitRequired: computed.makerBundle.permitKind !== 'none',
@@ -591,6 +697,8 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && parts.length === 2) {
         return json(res, 200, {
           id: offer.id,
+          offerId: offer.computed.offerId,
+          computedHash: offer.computedHash,
           status: (await status(offer)).status,
           terms: publicTerms(offer),
           // Whether the counterparty has signed is not secret, and a taker waiting on a maker needs
@@ -601,13 +709,72 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
+      if (req.method === 'GET' && parts[2] === 'cancel') {
+        const who = (url.searchParams.get('address') ?? '').toLowerCase();
+        if (addressRole(offer, who) !== 'maker') {
+          return json(res, 403, { error: 'only the maker can cancel this offer' });
+        }
+        const cancellation = offer.computed.makerCancellation;
+        return json(res, 200, {
+          offerId: offer.computed.offerId,
+          digest: cancellation.digest,
+          typedData: cancellation.bundleTypedData,
+          deadline: Number(cancellation.deadline),
+        });
+      }
+
+      if (req.method === 'POST' && parts[2] === 'cancel') {
+        const body = await readBody(req);
+        if (addressRole(offer, String(body.address ?? '').toLowerCase()) !== 'maker') {
+          return json(res, 403, { error: 'only the maker can cancel this offer' });
+        }
+        const cancellation = offer.computed.makerCancellation;
+        if (verifies(cancellation.bundleTypedData, body.signature, cancellation.owner) !== true) {
+          return json(res, 400, { error: 'signature does not match this cancellation plan' });
+        }
+
+        const directory = attemptFiles('cancel');
+        const computedFile = path.join(directory, 'computed.json');
+        const signatureFile = path.join(directory, 'signature.json');
+        fs.writeFileSync(computedFile, JSON.stringify(offer.computed, null, 2));
+        fs.writeFileSync(signatureFile, JSON.stringify({ signature: body.signature }));
+        try {
+          const out = execFileSync(
+            'forge',
+            ['script', 'script/LinkCancel.s.sol', '--rpc-url', RPC, '--broadcast'],
+            {
+              cwd: ROOT,
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                RELAYER_PRIVATE_KEY: CONFIG.relayerKey,
+                LINK_COMPUTED_FILE: computedFile,
+                LINK_SIGNATURE_FILE: signatureFile,
+              },
+            },
+          );
+          fs.rmSync(path.join(OFFERS_DIR, `${offer.id}.json`), { force: true });
+          offer.cancelledAt = new Date().toISOString();
+          saveOffer(offer);
+          return json(res, 200, { status: 'cancelled', relay: out.includes('already') ? 'already relayed' : 'relayed' });
+        } catch (err) {
+          return json(res, 409, { error: relayReason(String(err.stderr ?? err.message ?? '')) });
+        } finally {
+          fs.rmSync(directory, { recursive: true, force: true });
+        }
+      }
+
     // Everything the party's Shed holds, ready to be moved to their wallet. Computing it needs the
     // chain, so it is the same Solidity that signs it.
     if (req.method === 'GET' && parts[2] === 'withdraw') {
       const who = (url.searchParams.get('address') ?? '').toLowerCase();
       const role = addressRole(offer, who);
       if (!role) return json(res, 403, { error: 'this link is for a specific wallet' });
-      return json(res, 200, withdrawPlan(offer, role));
+      const plan = withdrawPlan(offer, role);
+      offer.withdrawals ??= {};
+      offer.withdrawals[role] = plan;
+      saveOffer(offer);
+      return json(res, 200, plan);
     }
 
     if (req.method === 'POST' && parts[2] === 'withdraw') {
@@ -620,8 +787,14 @@ const server = http.createServer(async (req, res) => {
 
       // The computed plan is replayed, never recomputed: a fresh deadline would build a different
       // message and reject a signature that is valid for what was signed.
-      const file = path.join(ROOT, 'out-json', 'withdraw-signature.json');
-      fs.writeFileSync(file, JSON.stringify({ signature: body.signature }, null, 2));
+      const plan = offer.withdrawals?.[role];
+      if (!plan || plan.empty) return json(res, 409, { error: 'prepare a non-empty withdrawal first' });
+      const directory = attemptFiles('withdraw-relay');
+      const computedFile = path.join(directory, 'computed.json');
+      const signatureFile = path.join(directory, 'signature.json');
+      fs.writeFileSync(path.join(directory, 'request.json'), JSON.stringify({ shedFactory: CONFIG.shedFactory }));
+      fs.writeFileSync(computedFile, JSON.stringify(plan, null, 2));
+      fs.writeFileSync(signatureFile, JSON.stringify({ signature: body.signature }, null, 2));
       try {
         const out = execFileSync(
           'forge',
@@ -631,7 +804,9 @@ const server = http.createServer(async (req, res) => {
             encoding: 'utf8',
             env: {
               ...process.env,
-              WITHDRAW_SIGNATURE_FILE: 'out-json/withdraw-signature.json',
+              WITHDRAW_REQUEST_FILE: path.join(directory, 'request.json'),
+              WITHDRAW_COMPUTED_FILE: computedFile,
+              WITHDRAW_SIGNATURE_FILE: signatureFile,
               RELAYER_PRIVATE_KEY: CONFIG.relayerKey,
             },
           },
@@ -640,6 +815,8 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { moved: true, relay: line });
       } catch (err) {
         return json(res, 400, { error: relayReason(String(err.stderr ?? err.message ?? '')) });
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true });
       }
     }
 
@@ -647,9 +824,6 @@ const server = http.createServer(async (req, res) => {
 
       if (req.method === 'POST' && parts[2] === 'signature') {
         const body = await readBody(req);
-        // Kept in the log because a signature that does not verify is otherwise unrecoverable:
-        // it is the only artefact that says which message the wallet actually signed.
-        console.log('signature', offer.id, body.role, JSON.stringify(body));
         if (!['maker', 'taker'].includes(body.role)) return json(res, 400, { error: 'role must be maker or taker' });
         if (!/^0x[0-9a-fA-F]{130}$/.test(body.signature ?? '')) {
           return json(res, 400, { error: 'signature must be 65 bytes, r || s || v' });
@@ -672,17 +846,21 @@ const server = http.createServer(async (req, res) => {
 
       if (req.method === 'POST' && parts[2] === 'accept') {
         const body = await readBody(req);
-        console.log('accept', offer.id, JSON.stringify(body));
         if (offer.orderUid) return json(res, 409, { error: 'already accepted', orderUid: offer.orderUid });
 
-        // An open offer binds to whoever accepts; a restricted one already knows its taker.
-        const restricted = offer.request.taker !== '0x0000000000000000000000000000000000000000';
-        if (restricted && body.taker && body.taker.toLowerCase() !== offer.request.taker.toLowerCase()) {
-          return json(res, 403, { error: 'this offer is restricted to another counterparty' });
+        // Acceptance is the one path that both moves money and takes a network round trip, so it is
+        // the one path a second request can slip into. The relay is idempotent (the Shed skips a
+        // nonce it has seen) and the order UID is derived from the order, so a duplicate costs work
+        // and a confusing second answer — not a second trade. Refuse it instead of paying that.
+        //
+        // Per process. Two service instances sharing a store still race here; see README.
+        if (accepting.has(offer.id)) {
+          return json(res, 409, { error: 'an acceptance is already in flight for this offer' });
         }
-        if (!restricted && body.taker) {
-          offer.request.taker = body.taker;
-          offer.computed = compute(offer.request);
+        accepting.add(offer.id);
+
+        if (body.taker && body.taker.toLowerCase() !== offer.request.taker.toLowerCase()) {
+          return json(res, 403, { error: 'this offer is restricted to another counterparty' });
         }
 
         const signature = body.signature ?? offer.signatures.taker;
@@ -705,21 +883,42 @@ const server = http.createServer(async (req, res) => {
           }
         }
 
-        // Relaying funds both Sheds, so the baseline for "has it settled" must be read after it,
-        // not before: otherwise the funding transfer itself looks like a sale.
-        const relayLog =
-          relay(offer.computed, { ...offer.signatures, makerPermit: offer.permits.maker, takerPermit: offer.permits.taker });
-        offer.makerBalanceAtAccept = balanceOf(offer.computed.sellToken, offer.computed.makerShed);
-
-        // The sub-solver now needs the private half: the maker's terms and its JIT order. Until
-        // this file exists the order sits in the auction and nothing can pair it.
-        fs.writeFileSync(path.join(OFFERS_DIR, `${offer.id}.json`), JSON.stringify(offer.computed, null, 2));
-
-        offer.orderUid = await postOrder(offer.computed.takerOrder);
-        offer.acceptedAt = new Date().toISOString();
+        offer.acceptance ??= { attemptId: crypto.randomUUID(), startedAt: new Date().toISOString() };
+        offer.acceptance.phase = 'funding';
+        delete offer.acceptance.error;
         saveOffer(offer);
 
-        return json(res, 202, { id: offer.id, orderUid: offer.orderUid, status: 'settling', relay: relayLog });
+        try {
+          const relayLog = relay(offer.computed, {
+            ...offer.signatures,
+            makerPermit: offer.permits.maker,
+            takerPermit: offer.permits.taker,
+          });
+          offer.acceptance.phase = 'funded';
+          saveOffer(offer);
+
+          // Publish atomically so the sub-solver never observes a partial plan.
+          const target = path.join(OFFERS_DIR, `${offer.id}.json`);
+          const temporary = `${target}.${offer.acceptance.attemptId}.tmp`;
+          fs.writeFileSync(temporary, JSON.stringify(offer.computed, null, 2));
+          fs.renameSync(temporary, target);
+          offer.acceptance.phase = 'published';
+          saveOffer(offer);
+
+          offer.orderUid = await postOrder(offer.computed.takerOrder);
+          offer.acceptedAt = new Date().toISOString();
+          offer.acceptance.phase = 'settling';
+          saveOffer(offer);
+
+          return json(res, 202, { id: offer.id, orderUid: offer.orderUid, status: 'settling', relay: relayLog });
+        } catch (err) {
+          offer.acceptance.phase = 'failed';
+          offer.acceptance.error = relayReason(String(err.stderr ?? err.message ?? ''));
+          saveOffer(offer);
+          return json(res, 502, { status: 'recovery_available', error: offer.acceptance.error });
+        } finally {
+          accepting.delete(offer.id);
+        }
       }
     }
 

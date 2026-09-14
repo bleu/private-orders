@@ -31,17 +31,29 @@ contract LinkRelay is Script {
   function run() external {
     uint256 relayerPrivateKey = vm.envUint("RELAYER_PRIVATE_KEY");
     address shedFactory = vm.envAddress("COWSHED_COMPOSABLE_COW_FACTORY_ADDRESS");
-    string memory computed = vm.readFile("out-json/link-computed.json");
-    string memory signatures = vm.readFile("out-json/link-signatures.json");
+    string memory computed = vm.readFile(vm.envOr("LINK_COMPUTED_FILE", string("out-json/link-computed.json")));
+    string memory signatures = vm.readFile(vm.envOr("LINK_SIGNATURES_FILE", string("out-json/link-signatures.json")));
 
     vm.startBroadcast(relayerPrivateKey);
-    _permit(computed, signatures, ".makerBundle", ".makerPermit");
-    _permit(computed, signatures, ".takerBundle", ".takerPermit");
-    _relay(shedFactory, computed, signatures, ".makerBundle", ".maker");
-    _relay(shedFactory, computed, signatures, ".takerBundle", ".taker");
+    _ensureSide(shedFactory, computed, signatures, ".makerBundle", ".maker", ".makerPermit");
+    _ensureSide(shedFactory, computed, signatures, ".takerBundle", ".taker", ".takerPermit");
     vm.stopBroadcast();
 
     console.log("bundles relayed");
+  }
+
+  function _ensureSide(
+    address shedFactory,
+    string memory computed,
+    string memory signatures,
+    string memory bundleKey,
+    string memory signatureKey,
+    string memory permitSignatureKey
+  ) private {
+    ShedBundle.Bundle memory bundle_ = _bundle(computed, bundleKey);
+    if (bundle_.shed.code.length > 0 && COWShed(payable(bundle_.shed)).nonces(bundle_.nonce)) return;
+    _permit(computed, signatures, bundleKey, permitSignatureKey);
+    _relay(shedFactory, computed, signatures, bundleKey, signatureKey);
   }
 
   /// @dev Grants the party's allowance to their own Shed, from the party's signature.

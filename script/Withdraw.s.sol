@@ -28,7 +28,7 @@ contract Withdraw is Script {
   uint256 internal constant VALID_FOR = 30 minutes;
 
   function run() external {
-    string memory request = vm.readFile("out-json/withdraw-request.json");
+    string memory request = vm.readFile(vm.envOr("WITHDRAW_REQUEST_FILE", string("out-json/withdraw-request.json")));
 
     // Relay mode replays the computed file and nothing else. Recomputing here would take a fresh
     // deadline from the relay's own clock, build a different message, and reject a signature that is
@@ -47,7 +47,7 @@ contract Withdraw is Script {
     uint256[] memory amounts = _amounts(shed, held);
     if (held.length == 0) {
       console.log("nothing to withdraw");
-      vm.writeFile("out-json/withdraw-computed.json", '{"empty":true}');
+      vm.writeFile(vm.envOr("WITHDRAW_COMPUTED_FILE", string("out-json/withdraw-computed.json")), '{"empty":true}');
       return;
     }
 
@@ -125,13 +125,13 @@ contract Withdraw is Script {
       _jsonAmounts(amounts),
       "}"
     );
-    vm.writeFile("out-json/withdraw-computed.json", computed);
+    vm.writeFile(vm.envOr("WITHDRAW_COMPUTED_FILE", string("out-json/withdraw-computed.json")), computed);
   }
 
   /// @dev Relays exactly what was signed: the nonce, deadline and amounts all come from the computed
   /// file, not from this run's clock or balances.
   function _relay(address shedFactory) private {
-    string memory computed = vm.readFile("out-json/withdraw-computed.json");
+    string memory computed = vm.readFile(vm.envOr("WITHDRAW_COMPUTED_FILE", string("out-json/withdraw-computed.json")));
     address shed = vm.parseJsonAddress(computed, ".shed");
     address owner = vm.parseJsonAddress(computed, ".owner");
     address[] memory targets = abi.decode(vm.parseJson(computed, ".targets"), (address[]));
