@@ -218,8 +218,15 @@ if (args[0] === 'wallet' && args[1] === 'sign') {
   const file = args.includes('--from-file') ? valueAfter('--from-file') : null;
   if (file) {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (typeof data.marker !== 'string') fail('the typed data has no marker');
-    process.stdout.write('0x' + data.marker + '0'.repeat(64) + '1b');
+    // The trade's own messages carry a marker, so a signature can be tied to the message it is for.
+    // A Safe message does not: the page asks for that wrapping on purpose, and the account is what
+    // decides whether the result is valid, so the fixture answers with the one blob it is told to
+    // expect (chain.json signatures).
+    if (typeof data.marker === 'string') {
+      process.stdout.write('0x' + data.marker + '0'.repeat(64) + '1b');
+      process.exit(0);
+    }
+    process.stdout.write('0x' + '42'.repeat(65));
     process.exit(0);
   }
   process.stdout.write('0x' + 'ab'.repeat(32) + 'cd'.repeat(32) + '1b');

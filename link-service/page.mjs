@@ -86,7 +86,13 @@ const devWalletShim = (enabled) => (enabled ? `
     request: async ({ method, params }) => {
       if (method === 'eth_requestAccounts' || method === 'eth_accounts') return [current];
       if (method === 'eth_chainId') return chain;
-      if (method === 'eth_signTypedData_v4') return sign({ address: current, typedData: JSON.parse(params[1]) });
+      if (method === 'eth_signTypedData_v4') {
+        const data = JSON.parse(params[1]);
+        // Kept so a test can assert what the page actually asked for, which is the only part of a
+        // smart account's flow this page is responsible for.
+        (window.__signedTypedData = window.__signedTypedData || []).push(data);
+        return sign({ address: current, typedData: data });
+      }
       if (method === 'personal_sign') return sign({ address: current, message: params[0] });
       if (method === 'eth_sendTransaction') {
         const tx = params[0];
@@ -376,7 +382,7 @@ function render() {
             throw new Error('The active account in your wallet is ' + (active ? short(active) : 'not set') +
               ', but this trade is with ' + short(account) + '.');
           }
-          const signature = await signTyped(plan.typedData);
+          const signature = await signDigest(plan.typedData, plan.digest);
           await post('/offers/' + id + '/withdraw', { address: account, signature });
           moved = true;
           await loadRole();
@@ -465,11 +471,12 @@ function render() {
   // What this wallet's kind means, said before the first prompt instead of after a failure.
   if (owner.isContract) {
     app.append(frag('<div class="note">This wallet is a smart contract account, not an account with a key. ' +
-      'It approves its Shed with a transaction, and it authorises the order through its own signature check. ' +
-      (ready.account && ready.account.threshold > 1
-        ? '<br><span class="warn">Its rules need ' + esc(ready.account.threshold) + ' signatures over the same ' +
-          'message, and this page cannot collect them yet.</span>'
-        : '') + '</div>'));
+      'It approves its Shed with a transaction, and it authorises the order by signing a message its own rules ' +
+      'accept' +
+      (ready.account && ready.account.threshold
+        ? ' — ' + esc(ready.account.threshold) + ' of ' + esc(ready.account.owners) + ' owners, which the wallet collects'
+        : '') +
+      '. The prompt is the wallet\u2019s own, so it may ask for more than one signature.</div>'));
   }
 
   app.append(frag('<div class="note">Your wallet will ask ' + esc(prompts) + '.' +
@@ -567,7 +574,7 @@ function render() {
         permitSig = await signTyped(me.permit.typedData);
         go.textContent = 'One more signature…';
       }
-      bundleSig = await signTyped(me.bundle.typedData);
+      bundleSig = await signDigest(me.bundle.typedData, me.bundle.digest);
       go.textContent = 'Submitting…';
       // The wallet's own account list travels with the signatures: a mismatch is almost always a
       // wallet signing with an account other than the one it reported, and the answer names it.
@@ -655,6 +662,36 @@ function signTyped(typedData) {
   // A JSON *string*. Rabby rejects the object form with -32602 "data is not a valid JSON string",
   // so this is not a stylistic choice: it is what this wallet requires.
   return usable.request({ method: 'eth_signTypedData_v4', params: [account, JSON.stringify(typedData)] });
+}
+
+/// Ask the wallet to authorise a digest.
+///
+/// An account holding a key signs the trade's own EIP-712 message. A contract account is asked for a
+/// **Safe message** instead, because that is what it verifies: Safe checks its owners' signatures over
+/// hashMessage(digest), so handing it the trade's typed data produces a signature it refuses — and
+/// the failure names a signer, not the message. A SafeMessage with the digest as its
+/// message hashes to exactly what it checks, which is why this is a request shape and not a second
+/// signature scheme.
+///
+/// Gathering however many owners its threshold needs is the wallet's business, not this page's: the
+/// Safe App, WalletConnect and the Safe SDK all do it, and they return one blob.
+function signDigest(typedData, digest) {
+  if (!(me.owner && me.owner.isContract)) return signTyped(typedData);
+  if (!digest) throw new Error('this wallet needs the digest of the message it is asked to authorise');
+  const account_ = (me.ready && me.ready.account) || {};
+  return signTyped({
+    domain: {
+      name: 'Safe',
+      // A Safe's domain carries its own version, read from the account. A message built with a
+      // different one hashes to something the account will not accept.
+      version: account_.version || '1.3.0',
+      chainId: Number((me.bundle && me.bundle.typedData.domain.chainId) || walletChain || 1),
+      verifyingContract: me.owner.address,
+    },
+    types: { SafeMessage: [{ name: 'message', type: 'bytes' }] },
+    primaryType: 'SafeMessage',
+    message: { message: digest },
+  });
 }
 
 function poll() {

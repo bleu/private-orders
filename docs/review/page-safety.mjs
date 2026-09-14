@@ -494,6 +494,40 @@ test('a smart contract account is told what it is and funds by approval', async 
   }
 });
 
+test('a smart contract account is asked for a Safe message, not the trade typed data', async () => {
+  // The account accepts exactly one blob; the fixture answers for it.
+  const fixture = await serviceWith({}, { contracts: [MAKER], signatures: { [MAKER]: `0x${'42'.repeat(65)}` } });
+  const browser = await launchChrome();
+  try {
+    const offer = await createOffer(fixture.port, { sellAmount: '100000000' });
+    await browser.open(offerUrl(fixture.port, offer.id));
+    await browser.waitFor("document.body.innerText.toLowerCase().includes('your part')", 'the trade page');
+
+    await browser.evaluate(
+      "[...document.querySelectorAll('button')].find((b) => b.textContent.includes('Approve and sign')).click()",
+    );
+    await browser.waitFor('(window.__signedTypedData || []).length > 0', 'the wallet to be asked to sign');
+
+    const asked = JSON.parse(await browser.evaluate('JSON.stringify(window.__signedTypedData[0])'));
+    // Safe checks its owners' signatures over hashMessage(digest), never over the digest, so the
+    // trade's own typed data would produce a signature the account refuses.
+    assert.equal(asked.primaryType, 'SafeMessage', JSON.stringify(asked));
+    assert.equal(asked.domain.name, 'Safe');
+    assert.equal(String(asked.domain.verifyingContract).toLowerCase(), MAKER);
+    const digest = offerRecord(fixture.root, offer.id).computed.makerBundle.digest;
+    assert.equal(asked.message.message, digest, 'the account was asked to authorise something else');
+
+    // And the account's answer was taken: the offer holds a signature.
+    await browser.waitFor(
+      `fetch('/offers/${offer.id}').then((r) => r.json()).then((o) => o.makerSigned === true)`,
+      'the signature to be accepted',
+    );
+  } finally {
+    browser.close();
+    await fixture.stop();
+  }
+});
+
 // --- runner ---------------------------------------------------------------------------------------
 
 async function main() {

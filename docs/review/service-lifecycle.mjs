@@ -378,19 +378,24 @@ test('a smart contract account funds by approval, not by a permit', async () => 
   assert.match(other.body.error, /not a signature of the authorisation/);
 });
 
-test('an account needing several signatures is reported before the prompt', async () => {
+test('a contract account decides its own threshold, and its blob is taken as it comes', async () => {
   const root = currentRoot;
   setChain(root, { contracts: [MAKER], thresholds: { [MAKER]: 2 }, owners: { [MAKER]: [MAKER, TAKER] } });
   const offer = await createOffer(port, { sellAmount: '6' });
 
+  // Gathering the owners is the account's job, not the service's: it is reported so the page can say
+  // what to expect, and it must not block anything.
   const view = await call(port, 'GET', `/offers/${offer.id}/role?address=${MAKER}`);
   assert.equal(view.body.ready.account.threshold, 2);
   assert.equal(view.body.ready.account.owners, 2);
-  assert.equal(view.body.ready.ok, false);
-  assert.ok(
-    view.body.ready.problems.some((p) => /more than one signature/.test(p)),
-    JSON.stringify(view.body.ready.problems),
-  );
+  assert.equal(view.body.ready.ok, true, JSON.stringify(view.body.ready.problems));
+
+  // The blob a multi-owner account returns is longer than one signature, and it is opaque here: the
+  // account is asked whether it is valid, and the service never inspects its shape.
+  const blob = `0x${'ab'.repeat(130)}`;
+  setChain(root, { signatures: { [MAKER]: blob } });
+  const accepted = await call(port, 'POST', `/offers/${offer.id}/signature`, { role: 'maker', signature: blob });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
 });
 
 // --- runner ---------------------------------------------------------------------------------------

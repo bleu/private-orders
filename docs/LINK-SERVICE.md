@@ -213,11 +213,20 @@ Two things change, and the service decides both from `cast code` on the account:
   way, so a contract account's correct signature is not reported as a wrong one by `ecrecover`. The
   relay's own pre-check branches the same way, in `ShedBundle.validSignature`.
 
-An account whose rules need **more than one signature** — a 2-of-3 Safe — is **reported as unsupported
-before the prompt**. Its owners have to sign the same message and their signatures concatenated in
-ascending address order (`Safe.checkSignatures` requires a strictly increasing signer), and collecting
-them is not implemented in any layer of this repo yet. Saying so is better than a prompt that cannot
-succeed.
+**The message matters more than the signature count.** A Safe does not verify a signature over the
+trade's digest; `CompatibilityFallbackHandler` and `SignatureVerifierMuxer.defaultIsValidSignature`
+both check its owners' signatures over `hashMessage(digest)`. So the page cannot hand a Safe the
+trade's own EIP-712 message and expect the result to be accepted — it asks for a `SafeMessage` whose
+`message` is the digest, which hashes to exactly what the account checks. The signature that comes
+back is opaque: the service never inspects its shape beyond a length sanity check, and asks the
+account whether it is valid.
+
+**Collecting the owners is the account's job, not ours.** A 2-of-3 Safe gathers its owners through its
+own tooling — the Safe App, WalletConnect, the Safe SDK — and returns one blob, whose owners' ECDSA
+signatures are concatenated in ascending address order because `Safe.checkSignatures` requires a
+strictly increasing signer. None of that belongs in this service or this page: the threshold and owner
+count are *reported* so the page can say what to expect, and never gate anything. What the app owes in
+exchange is to accept a blob of any reasonable length and to judge it by asking the account.
 
 ## Truthfulness, and where the page comes from
 

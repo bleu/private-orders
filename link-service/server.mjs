@@ -647,7 +647,7 @@ function checksBeforeSigning(offer, role) {
   const side = role === 'maker' ? computed.makerBundle : computed.takerBundle;
   const checks = [];
   const problems = [];
-  const account = { address: side.owner, isContract: hasCode(side.owner), threshold: null, owners: null };
+  const account = { address: side.owner, isContract: hasCode(side.owner), threshold: null, owners: null, version: null };
   const record = (name, detail, ok, problem) => {
     checks.push({ name, detail, ok });
     if (!ok) problems.push(problem);
@@ -714,23 +714,21 @@ function checksBeforeSigning(offer, role) {
     record('this side holds what it is selling', 'not readable', true, null);
   }
 
-  // A contract account whose rules need more than one signature is one this page cannot drive: the
-  // owners' signatures have to be collected over the same message and concatenated in the order the
-  // account requires. Reporting it now is more honest than a prompt that cannot succeed.
+  // A contract account's own rules decide how many signatures it needs, and gathering them is its
+  // job: a Safe's tooling — the Safe App, WalletConnect, its SDK — collects the owners and returns one
+  // blob. So this is reported, never required. The service's part is to accept whatever the account
+  // returns and ask the account whether it is valid.
   if (account.isContract) {
     try {
       account.threshold = Number(cast(['call', side.owner, 'getThreshold()(uint256)', '--rpc-url', RPC]).split(' ')[0]);
       const list = cast(['call', side.owner, 'getOwners()(address[])', '--rpc-url', RPC]).replace(/[[\]]/g, '');
       account.owners = list.split(',').map((entry) => entry.trim()).filter(Boolean).length;
-      record(
-        'this account can be authorised by one signature',
-        `${account.threshold} of ${account.owners} owners`,
-        account.threshold <= 1,
-        'this account needs more than one signature, and collecting them in the order it requires is not implemented yet',
-      );
+      // A Safe's EIP-712 domain carries its own version, and a signature over a message built with
+      // a different one hashes to something it will not accept. The account can be asked.
+      account.version = castString(cast(['call', side.owner, 'VERSION()(string)', '--rpc-url', RPC]));
+      record('this account can be authorised by its own rules', `${account.threshold} of ${account.owners} owners`, true, null);
     } catch {
-      // Not a Safe, or not a shape we can read. Let the signature itself decide.
-      record('this account can be authorised by one signature', 'not a readable multisig', true, null);
+      record('this account can be authorised by its own rules', 'not a readable multisig', true, null);
     }
   }
 
