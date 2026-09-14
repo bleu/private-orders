@@ -5,11 +5,61 @@ Two paths, both exercised against real deployments:
 | Path | Command | Needs |
 | --- | --- | --- |
 | Mainnet fork | `FORK_RPC=https://ethereum-rpc.publicnode.com forge test --match-path 'test/fork/*' -vv` | Network only |
-| Offline stack | `./scripts/offline-e2e.sh` | Docker, ~25 GB free, one Dockerfile patch |
+| Offline stack | `./scripts/link-service-e2e.sh`, `./scripts/app-e2e.sh` | Docker with ~32 GB free, the stack up |
 
 Both run the same `PrivateTradeE2EBase` flow: two EOAs own their orders through CoW Sheds, and one
 settlement exchanges the two assets atomically. Each also asserts the negative case — the same pair
 submitted directly to `GPv2Settlement` is refused.
+
+## Bringing the stack up
+
+This machine runs Docker through **Colima**, not Docker Desktop, so the start command is not
+`open -a Docker`:
+
+```bash
+colima start
+cd ../offline-mode
+docker compose up -d chain-deployer chain db db-migrations coingecko-mock \
+  orderbook autopilot driver baseline
+```
+
+That subset is enough for both e2e scripts. `grafana`, `prometheus`, `tempo`, `watch-tower`,
+`frontend` and `explorer` are not needed and some of them need a Rust build.
+
+The images for the CoW services are already built in the Colima disk (`offline-mode-orderbook`,
+`-autopilot`, `-driver`, `-baseline`, `-db-migrations`). If the disk has been reset, `docker compose
+up` rebuilds them from `offline-mode/modules/services`, which is a Rust workspace build and takes a
+long time. Check before starting:
+
+```bash
+docker images | grep offline-mode
+```
+
+`state/anvil-state.json` exists, so `chain-deployer` short-circuits and no archive RPC is needed.
+Anvil runs on chain **1** with `--block-time 2`, which is why the chain check in the page passes
+locally: the trade and the wallet are on the same chain.
+
+### When Colima refuses to start
+
+`colima start` can fail with:
+
+```
+failed to run attach disk "colima", in use by instance "colima"
+```
+
+That is a stale `in_use_by` symlink left by an unclean shutdown — there is no VM process running, and
+Lima treats any file at that path as "the disk is already attached". Rename it, the way Lima does when
+it recovers by itself:
+
+```bash
+pkill -f "colima daemon"; pkill -f "limactl usernet"
+mv ~/.colima/_lima/_disks/colima/in_use_by \
+   ~/.colima/_lima/_disks/colima/in_use_by.stale-$(date +%Y%m%dT%H%M%S)
+colima start
+```
+
+You will see earlier `in_use_by.stale-*` files there from previous occurrences; that is expected, not
+a sign of something else.
 
 The fork path is the cheaper one and needs no patching. Use the offline stack when you need the
 orderbook, autopilot and driver in the loop.

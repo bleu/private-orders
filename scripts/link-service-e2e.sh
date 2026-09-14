@@ -137,7 +137,13 @@ cast send "${USDC_ADDRESS}" "mint(address,uint256)" "${MAKER}" 100000000 \
 
 # The typed data is what a wallet signs, so it has to be the same message as the digest. This is
 # checked by signing both and requiring byte-identical signatures — not by trusting the JSON.
-typed_data() { python3 -c "import json,sys;d=json.load(open('out-json/link-computed.json'));print(json.dumps(d[sys.argv[1]][sys.argv[2]]))" "$1" "$2"; }
+#
+# It is read from the service, per offer, on request. A scratch file on disk belongs to whichever
+# offer wrote it last: the check that the page shows the right message was itself comparing today's
+# digest against a two-day-old blob, and passing a fixture that belonged to a different offer.
+view_field() {
+  python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(json.dumps(d[sys.argv[2]][sys.argv[3]]))" "$1" "$2" "$3"
+}
 signs_alike() {
   local typed=$1 digest=$2 key=$3 label=$4
   echo "${typed}" > /tmp/typed-data.json
@@ -151,8 +157,10 @@ log "maker signs the bundle and the permit — no transaction"
 echo "   permit: $(echo "${OFFER}" | jqq "d['funding']['kind']")"
 MAKER_DIGEST=$(echo "${OFFER}" | jqq "d['makerBundle']['digest']")
 MAKER_PERMIT=$(echo "${OFFER}" | jqq "d['funding']['digest']")
-signs_alike "$(typed_data makerBundle bundleTypedData)" "${MAKER_DIGEST}" "${MAKER_KEY}" "maker's bundle"
-signs_alike "$(typed_data makerBundle permitTypedData)" "${MAKER_PERMIT}" "${MAKER_KEY}" "maker's permit"
+MAKER_VIEW=/tmp/maker-view.json
+curl -fsS "${SERVICE}/offers/${OFFER_ID}/role?address=${MAKER}" > "${MAKER_VIEW}"
+signs_alike "$(view_field "${MAKER_VIEW}" bundle typedData)" "${MAKER_DIGEST}" "${MAKER_KEY}" "maker's bundle"
+signs_alike "$(view_field "${MAKER_VIEW}" permit typedData)" "${MAKER_PERMIT}" "${MAKER_KEY}" "maker's permit"
 MAKER_SIG=$(cast wallet sign --no-hash --private-key "${MAKER_KEY}" "${MAKER_DIGEST}")
 MAKER_PERMIT_SIG=$(cast wallet sign --no-hash --private-key "${MAKER_KEY}" "${MAKER_PERMIT}")
 curl -fsS -X POST "${SERVICE}/offers/${OFFER_ID}/signature" -H 'content-type: application/json' \
@@ -182,8 +190,8 @@ read -r M0 MD0 T0 TU0 <<< "$(snapshot)"
 read -r SHED_DAI0 SHED_USDC0 <<< "$(shed_balances)"
 
 log "taker accepts"
-signs_alike "$(typed_data takerBundle bundleTypedData)" "${TAKER_DIGEST}" "${TAKER_KEY}" "taker's bundle"
-signs_alike "$(typed_data takerBundle permitTypedData)" "${TAKER_PERMIT}" "${TAKER_KEY}" "taker's permit"
+signs_alike "$(echo "${VIEW}" | jqq "json.dumps(d['bundle']['typedData'])")" "${TAKER_DIGEST}" "${TAKER_KEY}" "taker's bundle"
+signs_alike "$(echo "${VIEW}" | jqq "json.dumps(d['permit']['typedData'])")" "${TAKER_PERMIT}" "${TAKER_KEY}" "taker's permit"
 TAKER_SIG=$(cast wallet sign --no-hash --private-key "${TAKER_KEY}" "${TAKER_DIGEST}")
 TAKER_PERMIT_SIG=$(cast wallet sign --no-hash --private-key "${TAKER_KEY}" "${TAKER_PERMIT}")
 ACCEPT=$(curl -fsS -X POST "${SERVICE}/offers/${OFFER_ID}/accept" -H 'content-type: application/json' \
@@ -233,3 +241,59 @@ read -r SHED_DAI1 SHED_USDC1 <<< "$(shed_balances)"
 echo "   neither Shed gained anything"
 [ "${MD1}" != "${MD0}" ] || { echo "FAILED: the maker wallet did not receive DAI" >&2; exit 1; }
 [ "${TU1}" != "${TU0}" ] || { echo "FAILED: the taker wallet did not receive USDC" >&2; exit 1; }
+
+# --- 6. cancellation -------------------------------------------------------------------------
+
+# A second offer, with different amounts so it is a different offer on-chain: the salt is
+# (maker, buyToken, block.timestamp), so two offers created in the same block with the same terms
+# would be the same offer and this would be testing nothing.
+log "maker cancels an unsigned trade"
+CANCEL_OFFER=$(curl -fsS -X POST "${SERVICE}/offers" -H 'content-type: application/json' -d "{
+  \"maker\": \"${MAKER}\",
+  \"taker\": \"${TAKER}\",
+  \"sellToken\": \"${USDC_ADDRESS}\",
+  \"sellAmount\": \"200000000\",
+  \"buyToken\": \"${DAI_ADDRESS}\",
+  \"buyAmount\": \"200000000000000000000\",
+  \"validFor\": 86400
+}")
+CANCEL_ID=$(echo "${CANCEL_OFFER}" | jqq "d['id']")
+echo "   link: $(echo "${CANCEL_OFFER}" | jqq "d['link']")"
+
+# The maker signs the bundle and the permit, so there is a real on-chain order and a real deposit to
+# revoke — cancelling an offer nobody signed would not exercise the order removal.
+CANCEL_VIEW=/tmp/cancel-view.json
+curl -fsS "${SERVICE}/offers/${CANCEL_ID}/role?address=${MAKER}" > "${CANCEL_VIEW}"
+CANCEL_DIGEST=$(echo "${CANCEL_OFFER}" | jqq "d['makerBundle']['digest']")
+CANCEL_PERMIT=$(echo "${CANCEL_OFFER}" | jqq "d['funding']['digest']")
+signs_alike "$(view_field "${CANCEL_VIEW}" bundle typedData)" "${CANCEL_DIGEST}" "${MAKER_KEY}" "cancellation offer's bundle"
+CANCEL_SIG=$(cast wallet sign --no-hash --private-key "${MAKER_KEY}" "${CANCEL_DIGEST}")
+CANCEL_PERMIT_SIG=$(cast wallet sign --no-hash --private-key "${MAKER_KEY}" "${CANCEL_PERMIT}")
+curl -fsS -X POST "${SERVICE}/offers/${CANCEL_ID}/signature" -H 'content-type: application/json' \
+  -d "{\"role\":\"maker\",\"signature\":\"${CANCEL_SIG}\",\"permitSignature\":\"${CANCEL_PERMIT_SIG}\"}" >/dev/null
+
+CANCEL_PLAN=$(curl -fsS "${SERVICE}/offers/${CANCEL_ID}/cancel?address=${MAKER}")
+CANCEL_TYPED=/tmp/cancel-typed.json
+signs_alike "$(echo "${CANCEL_PLAN}" | jqq "json.dumps(d['typedData'])")" \
+  "$(echo "${CANCEL_PLAN}" | jqq "d['digest']")" "${MAKER_KEY}" "cancellation"
+
+echo "${CANCEL_PLAN}" | jqq "json.dumps(d['typedData'])" > "${CANCEL_TYPED}"
+CANCEL_BUNDLE_SIG=$(cast wallet sign --data --from-file "${CANCEL_TYPED}" --private-key "${MAKER_KEY}")
+CANCELLED=$(curl -fsS -X POST "${SERVICE}/offers/${CANCEL_ID}/cancel" -H 'content-type: application/json' \
+  -d "{\"address\":\"${MAKER}\",\"signature\":\"${CANCEL_BUNDLE_SIG}\"}")
+echo "   relay: $(echo "${CANCELLED}" | jqq "d['relay']")"
+
+# The service reports cancelled only after reading the wrapper, so this is the chain's answer.
+CANCEL_STATUS=$(curl -fsS "${SERVICE}/offers/${CANCEL_ID}/status" | jqq "d['status']")
+CANCEL_STATE=$(curl -fsS "${SERVICE}/offers/${CANCEL_ID}/status" | jqq "d['wrapperState']")
+[ "${CANCEL_STATUS}" = "cancelled" ] || { echo "FAILED: the offer is ${CANCEL_STATUS}, not cancelled" >&2; exit 1; }
+[ "${CANCEL_STATE}" = "cancelled" ] || { echo "FAILED: the wrapper says ${CANCEL_STATE}" >&2; exit 1; }
+echo "   the wrapper reports the offer cancelled"
+
+# Cancelling again is not an error: a maker who is unsure must be able to retry, and the Shed skips a
+# nonce it has already seen.
+AGAIN=$(curl -fsS -X POST "${SERVICE}/offers/${CANCEL_ID}/cancel" -H 'content-type: application/json' \
+  -d "{\"address\":\"${MAKER}\",\"signature\":\"${CANCEL_BUNDLE_SIG}\"}")
+[ "$(echo "${AGAIN}" | jqq "d['status']")" = "cancelled" ] \
+  || { echo "FAILED: retrying the cancellation did not converge" >&2; exit 1; }
+echo "   retrying the cancellation converges"
