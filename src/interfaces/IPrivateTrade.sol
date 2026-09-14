@@ -96,6 +96,12 @@ error PrivateTrade_WrongActiveOffer(bytes32 expected, bytes32 actual);
 /// @dev Raised when an order is validated during a settlement for a different counterparty.
 error PrivateTrade_WrongActiveTaker(address expected, address actual);
 
+/// @dev Raised when a conditional order is asked to validate off-chain input.
+/// @dev ComposableCoW requires an `IConditionalOrder` to validate `offchainInput`, and this design
+/// has none: everything a discrete order depends on is in `staticInput`. Refusing non-empty input
+/// keeps that true, and stops a future order shape from silently ignoring attacker-supplied bytes.
+error PrivateTrade_UnexpectedOffchainInput();
+
 /// @dev Raised when the caller of `verify` is not the settlement contract.
 error PrivateTrade_NotSettlementCaller(address expected, address actual);
 
@@ -109,6 +115,13 @@ error PrivateTrade_OwnerRoleMismatch(PrivateTradeRole role, address expected, ad
 /// @dev Nothing may run between this wrapper's validation and `GPv2Settlement.settle`, because an
 /// intermediate bundle can rewrite the settlement calldata after it has been validated.
 error PrivateTrade_NotLastWrapper();
+
+/// @dev Raised when the wrapper is entered while a private trade window is already open.
+/// @dev The published context *is* the guarantee, so a second entry (a re-entrant solver, or a
+/// token with a transfer hook calling back) must not be able to validate against it, replace it, or
+/// clear it while the outer settlement is still running. `wrappedSettle` itself is vendored from
+/// upstream and carries no guard; this one lives where the window is set.
+error PrivateTrade_Reentered();
 
 /// @dev Raised when the offer itself is structurally unusable.
 error PrivateTrade_BadOffer();
@@ -154,6 +167,15 @@ event PrivateTradeOfferConsumed(bytes32 indexed offerId, address indexed taker);
 
 /// @notice Emitted when the maker cancels an available offer.
 event PrivateTradeOfferCancelled(bytes32 indexed offerId);
+
+/// @notice Emitted when a Shed authorises one side's conditional order, with the terms decoded.
+/// @dev The bundle a party signs carries those terms as `createChecked` calldata, which a wallet
+/// renders as a hex blob. This event is the contract's own readable record of what was authorised,
+/// so a party, its wallet software, or any watcher can reconcile the signature against the terms
+/// after the fact instead of trusting the page that proposed them.
+event PrivateTradeOrderAuthorised(
+  address indexed shed, address indexed owner, PrivateTradeRole indexed role, bytes32 offerId, PrivateTradeTerms terms
+);
 
 /// @notice View of the settlement context a conditional order validates against.
 interface IPrivateTradeWrapper {

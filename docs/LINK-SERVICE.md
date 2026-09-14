@@ -172,6 +172,53 @@ before it touches the permit, so a retry after partial funding converges instead
 consumed permit. The order UID is derived from the order, so re-posting an accepted offer is the same
 order.
 
+## Before a signature is taken
+
+A wallet prompt is expensive to take back, so everything that can be known before one is asked is
+asked first. `GET /offers/:id/role` reports the result as `ready`, and both `POST .../signature` and
+`POST .../accept` refuse with `409` while any of it fails — the page shows the same reasons and
+disables the button:
+
+| Check | What it catches |
+| --- | --- |
+| `validateWrapperData` accepts the payload | the same call the settlement makes, so a malformed offer is refused before anyone commits |
+| the wrapper is allowlisted as a solver | read from `AUTHENTICATOR().isSolver(wrapper)`, so a missing solver seat is a sentence rather than an opaque revert at settlement time |
+| the offer is still available | read from the wrapper, so a cancelled or consumed offer cannot be signed for |
+| the offer has not expired | the chain's clock, not the page's |
+| this side holds what it is selling | the relay pulls from the party's own account, so an unfunded side fails only after both signatures are collected |
+| the account can be authorised by one signature | see below |
+
+Every passing check is shown under "Verify independently" on the page, so the reader can see what was
+established rather than take the sentence on trust. A check whose answer cannot be read is reported as
+passing: an unreadable chain is not evidence of a problem, and blocking a working flow on a flaky read
+is worse than missing a warning. The settlement still refuses if the fact really is missing.
+
+**The relay is simulated before it is broadcast.** `LinkRelay` runs once without `--broadcast` — forge
+applies the whole script against current state and stops at the first call that would fail — and only
+then for real. A signature the Shed refuses, a nonce already spent, or an allowance that never arrived
+are reported before a transaction is paid for and before the taker is told the trade is settling.
+`RELAY_DRY_RUN=0` skips the extra pass.
+
+## Accounts that are contracts
+
+A party's account can be a smart contract rather than an account holding a key — a Safe, most often.
+Two things change, and the service decides both from `cast code` on the account:
+
+- **Funding.** A token permit is verified by `ecrecover` *inside the token*, so a contract account
+  cannot produce one at all. Offering that prompt costs a signature and then fails on the allowance,
+  blaming the party for something impossible. Such a side funds by an `approve` transaction instead,
+  which the service describes as calldata the page sends unmodified.
+- **Signature validation.** The Shed already handles this: `LibAuthenticatedHooks.authenticateHooks`
+  asks an owner with code over EIP-1271 and recovers an owner without it. The service asks the same
+  way, so a contract account's correct signature is not reported as a wrong one by `ecrecover`. The
+  relay's own pre-check branches the same way, in `ShedBundle.validSignature`.
+
+An account whose rules need **more than one signature** — a 2-of-3 Safe — is **reported as unsupported
+before the prompt**. Its owners have to sign the same message and their signatures concatenated in
+ascending address order (`Safe.checkSignatures` requires a strictly increasing signer), and collecting
+them is not implemented in any layer of this repo yet. Saying so is better than a prompt that cannot
+succeed.
+
 ## Truthfulness, and where the page comes from
 
 A page that asks for a signature has one job, and it is not looking nice: it has to say what is about

@@ -24,7 +24,7 @@ contract LinkCancel is Script {
 
     bytes32 declared = vm.parseJsonBytes32(computed, ".makerCancellation.digest");
     require(ShedBundle.digest(bundle_, shedFactory) == declared, "cancellation digest mismatch");
-    require(ShedBundle.recover(bundle_, shedFactory, signature) == bundle_.owner, "cancellation signer mismatch");
+    require(ShedBundle.validSignature(bundle_, shedFactory, signature), "cancellation signer mismatch");
 
     vm.startBroadcast(relayerPrivateKey);
     COWShedFactory(shedFactory).executeHooks(bundle_.calls, bundle_.nonce, bundle_.deadline, bundle_.owner, signature);

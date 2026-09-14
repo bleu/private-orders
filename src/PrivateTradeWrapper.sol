@@ -23,6 +23,7 @@ import {
   PrivateTrade_BadTaker,
   PrivateTrade_TakerNotAllowed,
   PrivateTrade_NotLastWrapper,
+  PrivateTrade_Reentered,
   PrivateTrade_BadOffer,
   PrivateTrade_Expired,
   PrivateTrade_InvalidSettleData,
@@ -119,6 +120,12 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
     override
   {
     if (remainingWrapperData.length != 0) revert PrivateTrade_NotLastWrapper();
+
+    // One window at a time. `wrappedSettle` is vendored upstream and unguarded, so a solver that
+    // re-enters (or a sell token whose `transferFrom` calls back) could otherwise validate a second
+    // pair against this context, or clear it while the outer orders are still being checked. The
+    // window is the guarantee, so it refuses to be shared.
+    if (_activeOfferId != bytes32(0)) revert PrivateTrade_Reentered();
 
     (bytes32 declaredOfferId, PrivateTradeTerms memory terms, PrivateTradeProposal.Proposal memory proposal) =
       abi.decode(wrapperData, (bytes32, PrivateTradeTerms, PrivateTradeProposal.Proposal));

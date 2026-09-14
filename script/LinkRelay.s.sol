@@ -155,13 +155,20 @@ contract LinkRelay is Script {
       string.concat("bundle digest mismatch: relayed ", vm.toString(recomputed), " signed ", vm.toString(declared))
     );
 
-    address signer = ShedBundle.recover(bundle_, shedFactory, signature);
+    // Checked by owner kind, exactly as the Shed does: an account with a key is recovered, a contract
+    // account is asked over ERC-1271. `recover` alone reports a smart account's valid signature as an
+    // unrelated address, which reads as a wrong signature with no way to tell the difference.
+    bool contractOwner = bundle_.owner.code.length > 0;
     require(
-      signer == bundle_.owner,
-      string.concat("signature recovers to ", vm.toString(signer), ", not ", vm.toString(bundle_.owner))
+      ShedBundle.validSignature(bundle_, shedFactory, signature),
+      string.concat("signature is not valid for ", vm.toString(bundle_.owner))
     );
 
-    console.log(bundleKey, "digest matches, signer", signer);
+    if (contractOwner) {
+      console.log(bundleKey, "digest matches, owner is a contract account that accepted the signature");
+    } else {
+      console.log(bundleKey, "digest matches, signer", ShedBundle.recover(bundle_, shedFactory, signature));
+    }
     COWShedFactory(shedFactory).executeHooks(bundle_.calls, bundle_.nonce, bundle_.deadline, bundle_.owner, signature);
   }
 

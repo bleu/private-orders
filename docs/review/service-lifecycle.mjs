@@ -20,6 +20,7 @@ import path from 'node:path';
 import {
   MAKER,
   TAKER,
+  USDC,
   call,
   createOffer,
   freePort,
@@ -260,6 +261,136 @@ test('settled requires a fulfilled order, a successful receipt, and consumed wra
   assert.equal(settled.body.status, 'settled');
   assert.equal(settled.body.settlementTx, '0xtransaction');
   assert.equal(settled.body.evidence.receiptSucceeded, true);
+});
+
+test('a refused acceptance does not wedge the offer', async () => {
+  const root = currentRoot;
+  const offer = await createOffer(port, { sellAmount: '6' });
+  await signAs(port, offer.id);
+  const taker = await signAs(port, offer.id, 'taker');
+
+  // Every one of these returns before the work starts. If the in-flight lock is taken any earlier,
+  // the offer reports "already in flight" for the rest of its life and nothing says why.
+  const wrongTaker = await call(port, 'POST', `/offers/${offer.id}/accept`, {
+    taker: '0x0000000000000000000000000000000000000001',
+    ...taker,
+  });
+  assert.equal(wrongTaker.status, 403, JSON.stringify(wrongTaker.body));
+
+  const shortSignature = await call(port, 'POST', `/offers/${offer.id}/accept`, { signature: '0x1234' });
+  assert.equal(shortSignature.status, 400, JSON.stringify(shortSignature.body));
+
+  const accepted = await call(port, 'POST', `/offers/${offer.id}/accept`, taker);
+  assert.equal(accepted.status, 202, `the offer was wedged: ${JSON.stringify(accepted.body)}`);
+  assert.ok(accepted.body.orderUid);
+});
+
+test('the relay is simulated before anything is broadcast', async () => {
+  const root = currentRoot;
+  const offer = await createOffer(port, { sellAmount: '6' });
+  await signAs(port, offer.id);
+  const taker = await signAs(port, offer.id, 'taker');
+
+  const broadcasts = () =>
+    Number(fs.existsSync(path.join(root, 'broadcasts')) ? fs.readFileSync(path.join(root, 'broadcasts'), 'utf8') : '0');
+
+  // The dry run is the pass without `--broadcast`: forge applies the whole script against current
+  // state and stops at the first call that would fail. Make only that pass fail.
+  fs.writeFileSync(path.join(root, 'dry-run-fault'), '');
+  const refused = await call(port, 'POST', `/offers/${offer.id}/accept`, taker);
+  assert.equal(refused.status, 502, JSON.stringify(refused.body));
+  assert.match(refused.body.error, /dry run failed on purpose/, JSON.stringify(refused.body));
+  assert.equal(broadcasts(), 0, 'the relay was broadcast even though its simulation failed');
+  assert.equal(orderbook.state.posts, 0, 'the order was posted after a failed simulation');
+  assert.equal(offerRecord(root, offer.id).acceptance.phase, 'failed');
+
+  // With the cause gone the same offer proceeds, and the broadcast pass is what runs.
+  fs.rmSync(path.join(root, 'dry-run-fault'));
+  const accepted = await call(port, 'POST', `/offers/${offer.id}/accept`, taker);
+  assert.equal(accepted.status, 202, JSON.stringify(accepted.body));
+  assert.equal(broadcasts(), 1, 'the relay was broadcast more than once');
+});
+
+test('an offer that cannot settle is refused before a signature is taken', async () => {
+  const root = currentRoot;
+  const offer = await createOffer(port, { sellAmount: '6' });
+
+  // Not allowlisted as a solver: nothing can ever submit the settlement, and the party would only
+  // discover it after two prompts and a failed relay.
+  setChain(root, { unallowlisted: true });
+  const refused = await signAs(port, offer.id).catch((err) => err);
+  assert.ok(refused instanceof Error, 'a signature was taken for an offer that could never settle');
+  assert.match(refused.message, /not allowlisted/, refused.message);
+
+  // The role view says the same thing, so the page can say it before the button is pressed.
+  const view = await call(port, 'GET', `/offers/${offer.id}/role?address=${MAKER}`);
+  assert.equal(view.body.ready.ok, false);
+  assert.ok(view.body.ready.problems.some((p) => /not allowlisted/.test(p)), JSON.stringify(view.body.ready.problems));
+  assert.ok(view.body.ready.checks.length >= 4, 'the checks were not reported');
+
+  // Clearing the cause lets the same offer proceed: nothing was consumed by the refusal.
+  setChain(root, { unallowlisted: false });
+  const accepted = await signAs(port, offer.id);
+  assert.ok(accepted.signature);
+});
+
+test('a party with nothing to sell is told before signing, not after', async () => {
+  const root = currentRoot;
+  const offer = await createOffer(port, { sellAmount: '500000000000' });
+  setChain(root, { tokens: { [USDC]: { symbol: 'USDC', decimals: 6, balances: {} } } });
+
+  const view = await call(port, 'GET', `/offers/${offer.id}/role?address=${MAKER}`);
+  assert.equal(view.body.ready.ok, false);
+  assert.ok(
+    view.body.ready.problems.some((p) => /must hold/.test(p)),
+    JSON.stringify(view.body.ready.problems),
+  );
+});
+
+test('a smart contract account funds by approval, not by a permit', async () => {
+  const root = currentRoot;
+
+  // A token permit is verified by `ecrecover` inside the token, so a contract account cannot produce
+  // one. Offering the prompt would cost a signature and then fail on the allowance.
+  //
+  // Set before the offer is created: the service remembers an owner's kind per address, and the
+  // create response already asks funding(), which asks this.
+  setChain(root, { contracts: [MAKER] });
+  const offer = await createOffer(port, { sellAmount: '6' });
+  const view = await call(port, 'GET', `/offers/${offer.id}/role?address=${MAKER}`);
+  assert.equal(view.body.owner.isContract, true);
+  assert.equal(view.body.funding.mode, 'approve');
+  assert.match(view.body.funding.reason, /smart contract account/);
+  assert.match(view.body.funding.approve.data, /^0x095ea7b3/);
+
+  // And its signature is checked by asking it, not by recovering: the fixture answers for exactly the
+  // blob the test placed there, so a different blob is refused the way the account would refuse it.
+  const blob = `0x${'ab'.repeat(65)}`;
+  setChain(root, { signatures: { [MAKER]: blob } });
+  const accepted = await call(port, 'POST', `/offers/${offer.id}/signature`, { role: 'maker', signature: blob });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+
+  const other = await call(port, 'POST', `/offers/${offer.id}/signature`, {
+    role: 'maker',
+    signature: `0x${'cd'.repeat(65)}`,
+  });
+  assert.equal(other.status, 400, JSON.stringify(other.body));
+  assert.match(other.body.error, /not a signature of the authorisation/);
+});
+
+test('an account needing several signatures is reported before the prompt', async () => {
+  const root = currentRoot;
+  setChain(root, { contracts: [MAKER], thresholds: { [MAKER]: 2 }, owners: { [MAKER]: [MAKER, TAKER] } });
+  const offer = await createOffer(port, { sellAmount: '6' });
+
+  const view = await call(port, 'GET', `/offers/${offer.id}/role?address=${MAKER}`);
+  assert.equal(view.body.ready.account.threshold, 2);
+  assert.equal(view.body.ready.account.owners, 2);
+  assert.equal(view.body.ready.ok, false);
+  assert.ok(
+    view.body.ready.problems.some((p) => /more than one signature/.test(p)),
+    JSON.stringify(view.body.ready.problems),
+  );
 });
 
 // --- runner ---------------------------------------------------------------------------------------

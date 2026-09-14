@@ -205,7 +205,9 @@ async function launchChrome() {
 
 // --- fixture setup --------------------------------------------------------------------------------
 
-async function serviceWith(extraEnv) {
+/// `chain` is applied before anything is created, because the service remembers an owner's kind per
+/// address and the create response already asks which funding mode applies.
+async function serviceWith(extraEnv, chain = {}) {
   const root = makeRoot();
   const orderbook = await startOrderbook();
   const port = await freePort();
@@ -222,6 +224,7 @@ async function serviceWith(extraEnv) {
     tokens: {
       [USDC]: { symbol: 'USDC', decimals: 6, balances: { [MAKER]: '100000000', [TAKER]: '100000000' } },
     },
+    ...chain,
   });
   return { root, orderbook, port, service, stop: async () => { await service.stop(); await orderbook.close(); } };
 }
@@ -395,6 +398,96 @@ test('the page says a DAI-style permit is unlimited instead of claiming an exact
       "/exactly/.test(document.querySelectorAll('.step')[0].textContent)",
     );
     assert.equal(claim, false, 'the page still claimed the DAI-style permit grants exactly this amount');
+  } finally {
+    browser.close();
+    await fixture.stop();
+  }
+});
+
+test('the page says how many prompts there are, and that nothing has moved yet', async () => {
+  const fixture = await serviceWith({});
+  const browser = await launchChrome();
+  try {
+    const offer = await createOffer(fixture.port, { sellAmount: '100000000' });
+    await browser.open(offerUrl(fixture.port, offer.id));
+    await browser.waitFor("document.body.innerText.toLowerCase().includes('your part')", 'the trade page');
+
+    const counted = await browser.evaluate(
+      "document.body.innerText.toLowerCase().includes('your wallet will ask two signatures')",
+    );
+    assert.equal(counted, true, 'the page did not say how many prompts to expect');
+
+    const which = await browser.evaluate(
+      "document.body.innerText.toLowerCase().includes('the second is the trade itself')",
+    );
+    assert.equal(which, true, 'the page did not say which prompt is the trade');
+
+    // Sign, then the scariest moment in the flow: it must say that nothing has happened yet.
+    await browser.evaluate(
+      "[...document.querySelectorAll('button')].find((b) => b.textContent.includes('Sign and')).click()",
+    );
+    await browser.waitFor(
+      "document.body.innerText.toLowerCase().includes('nothing has moved yet')",
+      'the after-signing note',
+    );
+    const share = await browser.evaluate(
+      "document.body.innerText.toLowerCase().includes('send this to the other party')",
+    );
+    assert.equal(share, true, 'the link was not offered after signing');
+  } finally {
+    browser.close();
+    await fixture.stop();
+  }
+});
+
+test('an offer that cannot settle disables the button and says why', async () => {
+  // The wrapper holds no solver seat, so nothing can ever submit this settlement.
+  const fixture = await serviceWith({}, { unallowlisted: true });
+  const browser = await launchChrome();
+  try {
+    const offer = await createOffer(fixture.port, { sellAmount: '100000000' });
+    await browser.open(offerUrl(fixture.port, offer.id));
+    await browser.waitFor("document.body.innerText.toLowerCase().includes('your part')", 'the trade page');
+
+    const warned = await browser.evaluate(
+      "document.body.innerText.toLowerCase().includes('cannot settle as it stands')",
+    );
+    assert.equal(warned, true, 'the page did not warn that the offer cannot settle');
+
+    const reason = await browser.evaluate(
+      "document.body.innerText.toLowerCase().includes('not allowlisted')",
+    );
+    assert.equal(reason, true, 'the page did not say what is wrong');
+
+    const disabled = await browser.evaluate(
+      "[...document.querySelectorAll('button')].filter((b) => /Sign and/.test(b.textContent)).every((b) => b.disabled)",
+    );
+    assert.equal(disabled, true, 'the signing button was live for an offer that cannot settle');
+  } finally {
+    browser.close();
+    await fixture.stop();
+  }
+});
+
+test('a smart contract account is told what it is and funds by approval', async () => {
+  const fixture = await serviceWith({}, { contracts: [MAKER] });
+  const browser = await launchChrome();
+  try {
+    const offer = await createOffer(fixture.port, { sellAmount: '100000000' });
+    await browser.open(offerUrl(fixture.port, offer.id));
+    await browser.waitFor("document.body.innerText.toLowerCase().includes('your part')", 'the trade page');
+
+    const said = await browser.evaluate(
+      "document.body.innerText.toLowerCase().includes('smart contract account')",
+    );
+    assert.equal(said, true, 'the page did not explain that this wallet is a contract account');
+
+    // A permit is impossible for a contract account, so the page must not offer one.
+    const mode = await browser.evaluate(
+      "document.body.innerText.toLowerCase().includes('approve your shed') && " +
+        "document.body.innerText.toLowerCase().includes('a transaction, then a signature')",
+    );
+    assert.equal(mode, true, 'a contract account was offered the permit path');
   } finally {
     browser.close();
     await fixture.stop();

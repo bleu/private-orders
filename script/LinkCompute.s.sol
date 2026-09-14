@@ -35,6 +35,8 @@ contract LinkCompute is Script {
     address buyToken;
     uint256 buyAmount;
     uint256 validFor;
+    /// @dev A fresh random 32 bytes, supplied by the offer's creator.
+    bytes32 salt;
     address wrapper;
     address handler;
     address shedFactory;
@@ -338,7 +340,7 @@ contract LinkCompute is Script {
         buyToken: request.buyToken,
         buyAmount: request.buyAmount,
         validTo: uint32(block.timestamp + request.validFor),
-        salt: keccak256(abi.encode("private-trade-link", request.maker, request.buyToken, block.timestamp))
+        salt: request.salt
       }),
       taker: COWShedFactory(request.shedFactory).proxyOf(request.allowedTaker),
       // Proceeds go to the parties' own wallets, not to the Sheds that hold the orders.
@@ -356,6 +358,13 @@ contract LinkCompute is Script {
     request.buyToken = vm.parseJsonAddress(json, ".buyToken");
     request.buyAmount = vm.parseJsonUint(json, ".buyAmount");
     request.validFor = vm.parseJsonUint(json, ".validFor");
+    // Required, and refused when missing rather than derived from the clock: the salt is what keeps
+    // two offers' order identities apart, and ComposableCoW asks for it to be cryptographically
+    // secure. A second-precision timestamp is guessable and collides for a repeated identical offer,
+    // which surfaces as a consumed hook nonce on relay. The offer's creator supplies it.
+    require(vm.keyExistsJson(json, ".salt"), "request is missing a random salt");
+    request.salt = vm.parseJsonBytes32(json, ".salt");
+    require(request.salt != bytes32(0), "salt must not be zero");
     request.wrapper = vm.parseJsonAddress(json, ".wrapper");
     request.handler = vm.parseJsonAddress(json, ".handler");
     request.shedFactory = vm.parseJsonAddress(json, ".shedFactory");

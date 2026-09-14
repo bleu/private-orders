@@ -10,6 +10,7 @@ import {
   IPrivateTradeWrapper,
   PrivateTradeRole,
   PrivateTradeTerms,
+  PrivateTradeOfferState,
   PrivateTrade_NoActiveTrade,
   PrivateTrade_WrongActiveOffer,
   PrivateTrade_WrongActiveTaker,
@@ -18,7 +19,8 @@ import {
   PrivateTrade_OwnerRoleMismatch,
   PrivateTrade_OrderMismatch,
   PrivateTrade_TakerNotAllowed,
-  PrivateTrade_BadTaker
+  PrivateTrade_BadTaker,
+  PrivateTrade_UnexpectedOffchainInput
 } from "./interfaces/IPrivateTrade.sol";
 import {PrivateTradeLib} from "./libraries/PrivateTradeLib.sol";
 
@@ -54,9 +56,13 @@ contract PrivateTradeOrder is IConditionalOrderGenerator {
     bytes32 domainSeparator,
     bytes32,
     bytes calldata staticInput,
-    bytes calldata,
+    bytes calldata offchainInput,
     GPv2Order.Data calldata order
   ) external view {
+    // ComposableCoW requires `offchainInput` to be validated. This order has none: the terms are
+    // fully known at creation, so anything non-empty is refused rather than ignored.
+    if (offchainInput.length != 0) revert PrivateTrade_UnexpectedOffchainInput();
+
     (PrivateTradeRole role, PrivateTradeTerms memory terms) =
       abi.decode(staticInput, (PrivateTradeRole, PrivateTradeTerms));
 
@@ -67,18 +73,27 @@ contract PrivateTradeOrder is IConditionalOrderGenerator {
   }
 
   /// @inheritdoc IConditionalOrderGenerator
-  /// @dev Off-chain helper: the order a party must authorise for these terms. Mirrors `verify`.
-  function getTradeableOrder(address owner, address, bytes32, bytes calldata staticInput, bytes calldata)
+  /// @dev Off-chain helper: the order a party must authorise for these terms. Mirrors `verify`, and
+  /// answers with the error codes a watch tower understands, so a dead offer is pruned instead of
+  /// retried forever (`IConditionalOrder.PollNever`).
+  function getTradeableOrder(address owner, address, bytes32, bytes calldata staticInput, bytes calldata offchainInput)
     external
-    pure
+    view
     returns (GPv2Order.Data memory)
   {
+    if (offchainInput.length != 0) revert PrivateTrade_UnexpectedOffchainInput();
+
     (PrivateTradeRole role, PrivateTradeTerms memory terms) =
       abi.decode(staticInput, (PrivateTradeRole, PrivateTradeTerms));
 
     address expectedOwner = role == PrivateTradeRole.Maker ? terms.offer.maker : terms.taker;
     if (owner != expectedOwner) revert PrivateTrade_OwnerRoleMismatch(role, expectedOwner, owner);
     if (terms.taker == address(0) || terms.taker == terms.offer.maker) revert PrivateTrade_BadTaker();
+
+    if (WRAPPER.offerState(PrivateTradeLib.offerId(terms.offer)) != PrivateTradeOfferState.Available) {
+      revert IConditionalOrder.PollNever("private trade is no longer available");
+    }
+    if (block.timestamp > terms.offer.validTo) revert IConditionalOrder.PollNever("private trade has expired");
 
     return _orderFor(role, terms, bytes32(0));
   }

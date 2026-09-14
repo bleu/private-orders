@@ -6,6 +6,7 @@ import {ComposableCoW} from "composable-cow/ComposableCoW.sol";
 import {IConditionalOrder} from "composable-cow/interfaces/IConditionalOrder.sol";
 import {Call} from "cow-shed/ICOWAuthHook.sol";
 import {COWShedFactory} from "cow-shed/COWShedFactory.sol";
+import {IERC1271} from "cow-shed/IERC1271.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 import {PrivateTradeAuthoriser} from "../PrivateTradeAuthoriser.sol";
@@ -35,6 +36,9 @@ library ShedBundle {
 
   bytes32 internal constant CALL_TYPE_HASH =
     keccak256("Call(address target,uint256 value,bytes callData,bool allowFailure,bool isDelegateCall)");
+
+  /// @dev magic value a valid ERC-1271 account returns.
+  bytes4 internal constant MAGIC_VALUE_1271 = 0x1626ba7e;
 
   struct Bundle {
     address owner;
@@ -244,5 +248,27 @@ library ShedBundle {
     }
     if (v < 27) v += 27;
     return ecrecover(digest(bundle_, shedFactory), v, r, s);
+  }
+
+  /// @notice Whether `signature` authorises `bundle_`, for any owner kind.
+  /// @dev Branches exactly as the Shed does (`LibAuthenticatedHooks.authenticateHooks`): an owner
+  /// with code is asked over ERC-1271, an EOA is recovered. `recover` alone reports a Smart account's
+  /// valid signature as `address(0)`, which a service reads as "bad signature" without a reason to
+  /// distinguish it from a genuinely wrong one. Checking before relaying turns that into a
+  /// diagnosable failure instead of the Shed's opaque `InvalidSignature()`.
+  function validSignature(Bundle memory bundle_, address shedFactory, bytes memory signature)
+    internal
+    view
+    returns (bool)
+  {
+    bytes32 digest_ = digest(bundle_, shedFactory);
+
+    if (bundle_.owner.code.length > 0) {
+      (bool ok, bytes memory result) =
+        bundle_.owner.staticcall(abi.encodeCall(IERC1271.isValidSignature, (digest_, signature)));
+      return ok && result.length >= 32 && abi.decode(result, (bytes4)) == MAGIC_VALUE_1271;
+    }
+
+    return recover(bundle_, shedFactory, signature) == bundle_.owner;
   }
 }

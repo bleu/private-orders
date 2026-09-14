@@ -137,6 +137,27 @@ function cast(args) {
   return execFileSync('cast', args, { cwd: ROOT, encoding: 'utf8' }).trim();
 }
 
+/// Whether an address is a contract, remembered per process.
+///
+/// The owner's kind decides two things the service cannot guess: a token permit can only be signed by
+/// an account holding a key, and a contract account answers a signature check over ERC-1271 instead of
+/// recovering to an address. A party's owner never changes kind, so one read is enough.
+const codeCache = new Map();
+function hasCode(address) {
+  const key = String(address ?? '').toLowerCase();
+  if (!key) return false;
+  if (!codeCache.has(key)) {
+    try {
+      codeCache.set(key, cast(['code', address, '--rpc-url', RPC]).trim() !== '0x');
+    } catch {
+      // An unreadable chain must not silently turn a contract owner into an EOA: assume code, which
+      // routes to the path that asks the owner rather than the one that guesses.
+      codeCache.set(key, true);
+    }
+  }
+  return codeCache.get(key);
+}
+
 /// Ask the Solidity builder to derive the whole payload. No private key, no transaction.
 function compute(request) {
   const directory = attemptFiles('compute');
@@ -176,21 +197,29 @@ function relay(computed, signatures) {
       2,
     ),
   );
+  const env = {
+    ...process.env,
+    RELAYER_PRIVATE_KEY: CONFIG.relayerKey,
+    LINK_COMPUTED_FILE: computedFile,
+    LINK_SIGNATURES_FILE: signaturesFile,
+  };
   let out;
   try {
+    // Dry run first. Without `--broadcast`, forge applies the whole script against current state and
+    // stops at the first call that would fail — so a signature the Shed refuses, a nonce already
+    // spent, or an allowance that never arrived are all reported before a transaction is paid for
+    // and before the taker is told the trade is settling. RELAY_DRY_RUN=0 skips the extra pass.
+    if (process.env.RELAY_DRY_RUN !== '0') {
+      execFileSync('forge', ['script', 'script/LinkRelay.s.sol', '--rpc-url', RPC], {
+        cwd: ROOT,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env,
+      });
+    }
     out = execFileSync(
       'forge',
       ['script', 'script/LinkRelay.s.sol', '--rpc-url', RPC, '--broadcast'],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          RELAYER_PRIVATE_KEY: CONFIG.relayerKey,
-          LINK_COMPUTED_FILE: computedFile,
-          LINK_SIGNATURES_FILE: signaturesFile,
-        },
-      },
+      { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env },
     ).toString();
   } catch (err) {
     // The relay already says why in one line. Everything around it is the command that failed and
@@ -310,20 +339,56 @@ function withdrawPlan(offer, role) {
   }
 }
 
-/// Does this signature belong to `address` over this exact typed data?
+/// Does this signature authorise this exact message, for this owner?
 ///
-/// Returns null when the question cannot be asked (no typed data, or a malformed signature), so the
-/// caller can tell "verified false" apart from "not checked".
-function verifies(typedData, signature, address) {
-  if (!typedData || !/^0x[0-9a-fA-F]{130}$/.test(signature ?? '')) return null;
+/// Returns null when the question cannot be asked (no message, or something too short to be a
+/// signature), so a caller can tell "verified false" apart from "not checked".
+///
+/// A contract owner is asked over ERC-1271 rather than recovered. It decides for itself what a valid
+/// signature is — a Safe wraps the digest as a Safe message internally and checks its own owners —
+/// and `ecrecover` reports a correct signature from one as an unrelated address. An account holding a
+/// key is recovered against the typed data, so the answer is about the message the wallet was shown
+/// and not a digest it never saw.
+function verifies({ typedData, digest, signature, owner }) {
+  const sig = signature ?? '';
+  if (!/^0x([0-9a-fA-F]{2})*$/.test(sig) || sig.length < 132) return null;
+
+  if (hasCode(owner)) {
+    if (!digest) return null;
+    try {
+      const result = cast([
+        'call', owner, 'isValidSignature(bytes32,bytes)(bytes4)', digest, sig, '--rpc-url', RPC,
+      ]);
+      return result.toLowerCase().startsWith('0x1626ba7e');
+    } catch {
+      // EIP-1271 requires the magic value or a revert, so a revert is an answer: not a signature.
+      return false;
+    }
+  }
+
+  if (!typedData || sig.length !== 132) return null;
   return withScratch('verify', 'typed-data.json', JSON.stringify(typedData), (file) => {
     const res = spawnSync(
       'cast',
-      ['wallet', 'verify', '--address', address, '--data', '--from-file', file, signature],
+      ['wallet', 'verify', '--address', owner, '--data', '--from-file', file, sig],
       { encoding: 'utf8' },
     );
     return res.status === 0;
   });
+}
+
+/// What shape a signature has to have, which depends on who is signing it.
+///
+/// An account holding a key produces exactly 65 bytes. A contract account produces whatever its own
+/// ERC-1271 implementation accepts: a single-owner Safe still 65, a multi-owner Safe its owners'
+/// signatures concatenated in ascending address order, a nested scheme possibly more.
+function signatureProblem(owner, signature) {
+  const sig = signature ?? '';
+  if (!/^0x([0-9a-fA-F]{2})*$/.test(sig) || sig.length < 132) {
+    return 'signature must be at least r || s || v, as hex';
+  }
+  if (hasCode(owner)) return sig.length > 8194 ? 'signature is longer than any ERC-1271 account should return' : null;
+  return sig.length === 132 ? null : `a signature from ${owner} must be exactly 65 bytes`;
 }
 
 /// Check a party's signatures before anything is relayed.
@@ -350,17 +415,21 @@ function preflight(offer, role, body) {
 
   // Only when the permit is what funds this side. A token whose permit cannot be presented as typed
   // data is funded by an `approve` transaction, and there is no permit signature to ask for.
-  if (funding(offer.computed, role).mode === 'permit' && side.permitTypedData) {
-    if (verifies(side.permitTypedData, body.permitSignature, owner) === false) {
+  const expectPermit = funding(offer.computed, role).mode === 'permit';
+  if (expectPermit && side.permitTypedData) {
+    if (
+      verifies({ typedData: side.permitTypedData, digest: side.permitDigest, signature: body.permitSignature, owner }) ===
+      false
+    ) {
       problems.push(
-        verifies(side.bundleTypedData, body.permitSignature, owner)
+        verifies({ typedData: side.bundleTypedData, digest: side.digest, signature: body.permitSignature, owner })
           ? 'the permit signature is over the order authorisation, so the two prompts were answered in the wrong order'
           : `the permit signature is not a signature of the permit this page showed, by ${owner}`,
       );
     }
   }
 
-  if (verifies(side.bundleTypedData, body.signature, owner) === false) {
+  if (verifies({ typedData: side.bundleTypedData, digest: side.digest, signature: body.signature, owner }) === false) {
     problems.push(`the order signature is not a signature of the authorisation this page showed, by ${owner}`);
   }
 
@@ -522,18 +591,24 @@ async function status(offer) {
 /// domain cannot be reproduced from its own `DOMAIN_SEPARATOR()`, so no wallet can be shown what it
 /// is signing — is funded by an ordinary `approve` transaction first.
 ///
-/// The two cases are reported distinctly, with the calldata to send, so a client never has to guess
-/// which one it is in or hand-build a transaction the server should have described.
+/// So is a party whose owner is a contract. A token permit is verified by `ecrecover` inside the
+/// token, so a smart account cannot produce one at all; asking it to sign one costs a prompt and then
+/// fails on the allowance, which blames the party for something impossible.
+///
+/// The cases are reported distinctly, with the calldata to send, so a client never has to guess which
+/// one it is in or hand-build a transaction the server should have described.
 const funding = (computed, role) => {
   const side = role === 'maker' ? computed.makerBundle : computed.takerBundle;
   const common = { token: side.sellToken, owner: side.owner, spender: side.shed, amount: side.sellAmount };
+  const contractOwner = hasCode(side.owner);
 
-  if (side.permitKind === 'none' || side.permitTypedDataAvailable !== true) {
+  if (contractOwner || side.permitKind === 'none' || side.permitTypedDataAvailable !== true) {
     return {
       mode: 'approve',
       ...common,
-      reason:
-        side.permitKind === 'none'
+      reason: contractOwner
+        ? 'this side is a smart contract account, and a token permit can only be signed by an account holding a key'
+        : side.permitKind === 'none'
           ? 'this token has no permit'
           : 'this token has a permit, but its typed data cannot be reproduced from its own domain separator, so a wallet cannot be shown what it is signing',
       note: 'approve your Shed, then sign the authorisation. The approval is a transaction, so this side pays gas once.',
@@ -560,6 +635,107 @@ const funding = (computed, role) => {
       : `the permit moves at most ${side.sellAmount} into your own Shed, so publishing it is safe`,
   };
 };
+
+/// Everything that can be known before a party signs, so a trade that cannot settle is reported
+/// before anyone is asked for a prompt rather than after both of them are.
+///
+/// Each check is something the settlement itself would refuse on, asked the same way it is asked
+/// there. None of them need a signature, which is the point: a dead offer should cost somebody a
+/// sentence, not two wallet prompts and a failed relay.
+function checksBeforeSigning(offer, role) {
+  const computed = offer.computed;
+  const side = role === 'maker' ? computed.makerBundle : computed.takerBundle;
+  const checks = [];
+  const problems = [];
+  const account = { address: side.owner, isContract: hasCode(side.owner), threshold: null, owners: null };
+  const record = (name, detail, ok, problem) => {
+    checks.push({ name, detail, ok });
+    if (!ok) problems.push(problem);
+  };
+
+  // The same call the settlement makes, so a payload the wrapper would refuse is caught here instead
+  // of reverting later with an opaque error.
+  try {
+    cast(['call', computed.wrapper, 'validateWrapperData(bytes)', computed.wrapperData, '--rpc-url', RPC]);
+    record('the wrapper accepts this offer', null, true, null);
+  } catch (err) {
+    record(
+      'the wrapper accepts this offer',
+      null,
+      false,
+      `the wrapper refuses this offer: ${relayReason(String(err.stderr ?? err.message ?? ''))}`,
+    );
+  }
+
+  // A bundle cannot call the settlement contract at all without a solver seat, and that is a manager
+  // action nobody in this flow can perform. Reading it here turns an opaque revert at settlement
+  // time into a sentence before the first prompt.
+  try {
+    const authenticator = cast(['call', computed.wrapper, 'AUTHENTICATOR()(address)', '--rpc-url', RPC]).trim();
+    const allowed = cast(['call', authenticator, 'isSolver(address)(bool)', computed.wrapper, '--rpc-url', RPC]).trim();
+    const ok = allowed === 'true';
+    record(
+      'the wrapper is allowlisted as a solver',
+      computed.wrapper,
+      ok,
+      `the wrapper ${computed.wrapper} is not allowlisted as a solver on this chain, so nothing can settle`,
+    );
+  } catch {
+    // An unreadable authenticator is not evidence of a problem, and guessing here would block a
+    // working flow. The settlement still refuses if it really is missing.
+    record('the wrapper is allowlisted as a solver', 'not readable', true, null);
+  }
+
+  const state = wrapperOfferState(computed.offerId);
+  record(
+    'the offer is still available',
+    state,
+    state === 'available',
+    state === 'available' ? null : `the offer is ${state}, so it can no longer settle`,
+  );
+
+  const expiry = Number(computed.validTo);
+  const live = expiry > 0 && expiry * 1000 > Date.now();
+  record('the offer has not expired', new Date(expiry * 1000).toISOString(), live, 'the offer has expired');
+
+  // The relay pulls the sell tokens from the party's own account, so a party who does not hold them
+  // fails after both signatures are collected. The page shows the balance; this is the same fact
+  // stated as a reason.
+  try {
+    const held = BigInt(balanceOf(side.sellToken, side.owner));
+    const ok = held >= BigInt(side.sellAmount);
+    record(
+      'this side holds what it is selling',
+      String(held),
+      ok,
+      `this side must hold ${side.sellAmount} of ${side.sellToken} before it can fund its Shed`,
+    );
+  } catch {
+    record('this side holds what it is selling', 'not readable', true, null);
+  }
+
+  // A contract account whose rules need more than one signature is one this page cannot drive: the
+  // owners' signatures have to be collected over the same message and concatenated in the order the
+  // account requires. Reporting it now is more honest than a prompt that cannot succeed.
+  if (account.isContract) {
+    try {
+      account.threshold = Number(cast(['call', side.owner, 'getThreshold()(uint256)', '--rpc-url', RPC]).split(' ')[0]);
+      const list = cast(['call', side.owner, 'getOwners()(address[])', '--rpc-url', RPC]).replace(/[[\]]/g, '');
+      account.owners = list.split(',').map((entry) => entry.trim()).filter(Boolean).length;
+      record(
+        'this account can be authorised by one signature',
+        `${account.threshold} of ${account.owners} owners`,
+        account.threshold <= 1,
+        'this account needs more than one signature, and collecting them in the order it requires is not implemented yet',
+      );
+    } catch {
+      // Not a Safe, or not a shape we can read. Let the signature itself decide.
+      record('this account can be authorised by one signature', 'not a readable multisig', true, null);
+    }
+  }
+
+  return { ok: problems.length === 0, role, checks, problems, account };
+}
 
 /// The terms, with amounts already scaled. No addresses: this view answers to whoever holds the link.
 const publicTerms = (offer) => {
@@ -666,6 +842,16 @@ const server = http.createServer(async (req, res) => {
       if (!/^0x[0-9a-fA-F]{40}$/.test(body.taker ?? '') || /^0x0{40}$/i.test(body.taker)) {
         return json(res, 400, { error: 'a concrete taker address is required for this beta' });
       }
+      // The maker's browser picks the offer salt; a caller that omits it gets a cryptographically
+      // secure one, and a malformed one is refused rather than silently replaced. It is never
+      // derived from anything public: ComposableCoW asks for a secure salt because it is what keeps
+      // two offers' order identities apart, and the hook nonce and ComposableCoW salt come from it.
+      const salt = body.salt === undefined || body.salt === null
+        ? `0x${crypto.randomBytes(32).toString('hex')}`
+        : String(body.salt).toLowerCase();
+      if (!/^0x[0-9a-f]{64}$/.test(salt) || /^0x0{64}$/.test(salt)) {
+        return json(res, 400, { error: 'salt must be 32 non-zero bytes of hex' });
+      }
       // Explicitly enumerated: CONFIG also holds the relayer key, and this object is written to disk.
       const request = {
         maker: body.maker,
@@ -675,6 +861,7 @@ const server = http.createServer(async (req, res) => {
         buyToken: body.buyToken,
         buyAmount: String(body.buyAmount),
         validFor: String(body.validFor ?? 86400),
+        salt,
         wrapper: CONFIG.wrapper,
         handler: CONFIG.handler,
         shedFactory: CONFIG.shedFactory,
@@ -759,6 +946,12 @@ const server = http.createServer(async (req, res) => {
           // What the Shed may already move. `approve` mode is finished when this reaches the amount,
           // and a permit that was front-run shows up here too.
           allowance: allowanceOf(side.sellToken, side.owner, side.shed),
+          // A contract account signs differently and funds differently from one holding a key, and the
+          // page says which before the first prompt rather than explaining a failure after it.
+          owner: { address: side.owner, isContract: hasCode(side.owner) },
+          // What is already known to be wrong, before anybody is asked for anything. Every one of
+          // these would refuse the settlement, and none of them need a signature to answer.
+          ready: checksBeforeSigning(offer, role),
           signed: offer.signatures?.[role] !== undefined,
           makerSigned: offer.signatures?.maker !== undefined,
           orderUid: offer.orderUid ?? null,
@@ -800,7 +993,7 @@ const server = http.createServer(async (req, res) => {
           return json(res, 403, { error: 'only the maker can cancel this offer' });
         }
         const cancellation = offer.computed.makerCancellation;
-        if (verifies(cancellation.bundleTypedData, body.signature, cancellation.owner) !== true) {
+        if (verifies({ typedData: cancellation.bundleTypedData, digest: cancellation.digest, signature: body.signature, owner: cancellation.owner }) !== true) {
           return json(res, 400, { error: 'signature does not match this cancellation plan' });
         }
 
@@ -896,10 +1089,15 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && parts[2] === 'signature') {
         const body = await readBody(req);
         if (!['maker', 'taker'].includes(body.role)) return json(res, 400, { error: 'role must be maker or taker' });
-        if (!/^0x[0-9a-fA-F]{130}$/.test(body.signature ?? '')) {
-          return json(res, 400, { error: 'signature must be 65 bytes, r || s || v' });
-        }
         const side = body.role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
+        const shape = signatureProblem(side.owner, body.signature);
+        if (shape) return json(res, 400, { error: shape, expectedSigner: side.owner });
+
+        // Refuse before signing for the reasons that would refuse after it. A signature that cannot
+        // lead anywhere is not a favour, and a wallet prompt is expensive to take back.
+        const ready = checksBeforeSigning(offer, body.role);
+        if (!ready.ok) return json(res, 409, { error: 'this offer cannot settle', problems: ready.problems, checks: ready.checks });
+
         if (funding(offer.computed, body.role).mode === 'permit' && !/^0x[0-9a-fA-F]{130}$/.test(body.permitSignature ?? '')) {
           return json(res, 400, {
             error: `this side is funded by a permit, so a permitSignature is required alongside the authorisation`,
@@ -929,7 +1127,6 @@ const server = http.createServer(async (req, res) => {
         if (accepting.has(offer.id)) {
           return json(res, 409, { error: 'an acceptance is already in flight for this offer' });
         }
-        accepting.add(offer.id);
 
         if (body.taker && body.taker.toLowerCase() !== offer.request.taker.toLowerCase()) {
           return json(res, 403, { error: 'this offer is restricted to another counterparty' });
@@ -937,6 +1134,16 @@ const server = http.createServer(async (req, res) => {
 
         const signature = body.signature ?? offer.signatures.taker;
         if (!signature) return json(res, 400, { error: 'signature required' });
+        const shape = signatureProblem(offer.computed.takerBundle.owner, signature);
+        if (shape) return json(res, 400, { error: shape, expectedSigner: offer.computed.takerBundle.owner });
+
+        // The taker is the party who commits both sides: accepting relays both bundles, which funds
+        // their Shed and the maker's. So the offer has to be settleable before their signature is
+        // taken, not after.
+        const ready = checksBeforeSigning(offer, 'taker');
+        if (!ready.ok) {
+          return json(res, 409, { error: 'this offer cannot settle', problems: ready.problems, checks: ready.checks });
+        }
         // Always check what is being submitted now, not what is already on file.
         const wrong = preflight(offer, 'taker', { ...body, signature });
         if (wrong) return json(res, 400, wrong);
@@ -959,6 +1166,10 @@ const server = http.createServer(async (req, res) => {
         delete offer.acceptance.error;
         saveOffer(offer);
 
+        // Taken here, immediately before the work, and not a line earlier: every check above can
+        // return, and a lock held across a return never comes back — the offer would report "already
+        // in flight" for the rest of its life.
+        accepting.add(offer.id);
         try {
           const relayLog = relay(offer.computed, {
             ...offer.signatures,

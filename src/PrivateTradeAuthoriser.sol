@@ -4,7 +4,8 @@ pragma solidity >=0.8.0 <0.9.0;
 import {ComposableCoW} from "composable-cow/ComposableCoW.sol";
 import {IConditionalOrder} from "composable-cow/interfaces/IConditionalOrder.sol";
 
-import {PrivateTradeRole, PrivateTradeTerms} from "./interfaces/IPrivateTrade.sol";
+import {PrivateTradeRole, PrivateTradeTerms, PrivateTradeOrderAuthorised} from "./interfaces/IPrivateTrade.sol";
+import {PrivateTradeLib} from "./libraries/PrivateTradeLib.sol";
 
 /// @dev The Shed exposes the address that controls it, but only to itself.
 interface IShedAdminView {
@@ -36,6 +37,21 @@ contract PrivateTradeAuthoriser {
   error PrivateTrade_RoleDoesNotMatchShed(PrivateTradeRole declared, PrivateTradeRole actual);
   error PrivateTrade_BeneficiaryNotOwner(uint256 side, address beneficiary, address owner);
 
+  /// @notice Which side `shed` is in `terms`, who that side is paid, and the offer it belongs to.
+  /// @dev The counterpart to the event: a wallet, a relayer, or an independent checker can ask the
+  /// chain what a proposed bundle will enforce instead of trusting the page that rendered it. It
+  /// reverts for a Shed that is not a party, exactly as `createChecked` would, but it cannot check
+  /// the beneficiary itself: the owner is only readable from inside the Shed, which is the whole
+  /// reason `createChecked` runs as a delegatecall.
+  function describe(address shed, PrivateTradeTerms memory terms)
+    external
+    pure
+    returns (PrivateTradeRole role, address beneficiary, bytes32 offerId)
+  {
+    (role, beneficiary) = _sideOf(shed, terms);
+    offerId = PrivateTradeLib.offerId(terms.offer);
+  }
+
   /// @notice Read the terms, check this side's beneficiary, and create the order.
   /// @dev Called by the party's Shed with `delegatecall`, so `address(this)` is the Shed and the
   /// `create` below is owned by it.
@@ -52,6 +68,8 @@ contract PrivateTradeAuthoriser {
     if (beneficiary != owner) revert PrivateTrade_BeneficiaryNotOwner(uint256(actual), beneficiary, owner);
 
     composableCoW.create(params, false);
+
+    emit PrivateTradeOrderAuthorised(address(this), owner, actual, PrivateTradeLib.offerId(terms.offer), terms);
   }
 
   /// @notice Which side a Shed is in these terms, and who that side pays.

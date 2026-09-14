@@ -93,6 +93,43 @@ contract PrivateTradeBuilderTest is PrivateTradeTestBase {
     assertEq(chain.length, 2 + _wrapperData(terms).length);
   }
 
+  /// @dev The salt a fresh offer carries has to be a fresh random value, and this is what it buys:
+  /// two offers that differ only in the salt are two different offers, with two different order
+  /// identities, conditional-order salts and hook nonces. ComposableCoW asks for a cryptographically
+  /// secure salt exactly so this separation cannot be predicted by whoever is watching.
+  function test_saltSeparatesTwoOtherwiseIdenticalOffers() public view {
+    PrivateTradeTerms memory first = _terms(address(bob), address(bob));
+    PrivateTradeTerms memory second = _terms(address(bob), address(bob));
+    second.offer.salt = keccak256("a different random 32 bytes");
+
+    assertTrue(first.offer.salt != second.offer.salt, "fixture salts must differ");
+    assertTrue(
+      PrivateTradeLib.offerId(first.offer) != PrivateTradeLib.offerId(second.offer), "offers share an identity"
+    );
+
+    (
+      IConditionalOrder.ConditionalOrderParams memory firstMaker,
+      IConditionalOrder.ConditionalOrderParams memory firstTaker
+    ) = PrivateTradeBuilder.conditionalOrderParams(address(handler), first);
+    (
+      IConditionalOrder.ConditionalOrderParams memory secondMaker,
+      IConditionalOrder.ConditionalOrderParams memory secondTaker
+    ) = PrivateTradeBuilder.conditionalOrderParams(address(handler), second);
+
+    assertTrue(firstMaker.salt != secondMaker.salt, "maker conditional orders share a salt");
+    assertTrue(firstTaker.salt != secondTaker.salt, "taker conditional orders share a salt");
+  }
+
+  /// @dev Reusing a salt with the same terms reproduces the same offer exactly, which is the reason
+  /// a repeated offer has to carry a new one: the second relay would collide on a consumed hook
+  /// nonce rather than create a second offer.
+  function test_reusingASaltReproducesTheSameOffer() public view {
+    PrivateTradeTerms memory first = _terms(address(bob), address(bob));
+    PrivateTradeTerms memory second = _terms(address(bob), address(bob));
+
+    assertEq(PrivateTradeLib.offerId(first.offer), PrivateTradeLib.offerId(second.offer), "identity should match");
+  }
+
   function _roleOf(IConditionalOrder.ConditionalOrderParams memory params)
     private
     pure

@@ -78,7 +78,10 @@ contract PreparePrivateTrade is Script {
         buyToken: c.dai,
         buyAmount: c.daiAmount,
         validTo: uint32(block.timestamp + c.validFor),
-        salt: keccak256(abi.encode("private-trade-offline", c.makerShed, c.takerShed, block.timestamp))
+        // Not a clock reading: this fixture only needs a salt no earlier run used, and the forge
+        // random is fresh per run. `script/LinkCompute.s.sol` takes a real random one from the
+        // offer's creator instead.
+        salt: keccak256(abi.encode("private-trade-offline", c.makerShed, c.takerShed, vm.randomUint()))
       }),
       taker: c.takerShed,
       makerBeneficiary: c.makerEoa,

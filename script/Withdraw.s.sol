@@ -146,7 +146,7 @@ contract Withdraw is Script {
 
     address signer = ShedBundle.recover(bundle_, shedFactory, signature);
     require(
-      signer == owner,
+      ShedBundle.validSignature(bundle_, shedFactory, signature),
       string.concat("withdraw signature recovers to ", vm.toString(signer), ", not ", vm.toString(owner))
     );
 

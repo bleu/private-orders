@@ -144,6 +144,14 @@ if (script.endsWith('LinkCompute.s.sol')) {
 
 if (script.endsWith('LinkRelay.s.sol')) {
   if (fs.existsSync(root + '/relay-fault')) fail('the relay failed on purpose');
+  const broadcasting = args.includes('--broadcast');
+  // A switch that fails only the dry run, so a test can prove the simulation happens and that
+  // nothing was broadcast when it does not pass.
+  if (!broadcasting && fs.existsSync(root + '/dry-run-fault')) fail('the dry run failed on purpose');
+  if (broadcasting) {
+    const file = root + '/broadcasts';
+    fs.writeFileSync(file, String(Number(fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '0') + 1));
+  }
   process.stdout.write('bundles relayed\\n');
   process.exit(0);
 }
@@ -242,10 +250,50 @@ if (args[0] === 'send') {
   process.exit(0);
 }
 
+if (args[0] === 'code') {
+  const state = chain();
+  const address = String(args[1]).toLowerCase();
+  process.stdout.write((state.contracts ?? []).includes(address) ? '0x60806040' : '0x');
+  process.exit(0);
+}
+
 if (args[0] === 'call') {
   const target = args[1];
   const signature = args[2];
   const state = chain();
+
+  // The checks the service makes before a party is asked to sign. Each has a switch, so a test can
+  // assert that the failure is reported before the prompt rather than after it.
+  if (signature.startsWith('validateWrapperData')) {
+    if (state.wrapperRejects) fail('the wrapper refuses this offer');
+    process.stdout.write('0x1626ba7e');
+    process.exit(0);
+  }
+  if (signature.startsWith('AUTHENTICATOR')) {
+    process.stdout.write(state.authenticator ?? '0x00000000000000000000000000000000000000a1');
+    process.exit(0);
+  }
+  if (signature.startsWith('isSolver')) {
+    process.stdout.write(state.unallowlisted ? 'false' : 'true');
+    process.exit(0);
+  }
+  if (signature.startsWith('getThreshold')) {
+    process.stdout.write(String(state.thresholds?.[String(target).toLowerCase()] ?? 1));
+    process.exit(0);
+  }
+  if (signature.startsWith('getOwners')) {
+    const owners = state.owners?.[String(target).toLowerCase()] ?? [target];
+    process.stdout.write('[' + owners.join(', ') + ']');
+    process.exit(0);
+  }
+  // A contract owner is asked over ERC-1271. The fake answers for exactly the blob the test put
+  // there, so a wrong signature is refused the way an account would refuse it.
+  if (signature.startsWith('isValidSignature')) {
+    const expected = state.signatures?.[String(target).toLowerCase()];
+    if (!expected) fail('no signature is expected for ' + target);
+    process.stdout.write(String(args[4]).toLowerCase() === expected.toLowerCase() ? '0x1626ba7e' : '0xffffffff');
+    process.exit(0);
+  }
   if (signature.startsWith('offerState')) {
     process.stdout.write(String(state.offerState?.[args[3]] ?? 0) + '\\n');
     process.exit(0);
@@ -327,7 +375,15 @@ export function makeRoot() {
     fs.chmodSync(file, 0o755);
   }
 
-  setChain(root, {});
+  // Both parties hold what they are selling, because the service now refuses to take a signature for
+  // a side that could not fund its Shed. Without this the harness would exercise a state the chain
+  // can never be in.
+  setChain(root, {
+    tokens: {
+      [USDC]: { symbol: 'USDC', decimals: 6, balances: { [MAKER]: '1000000000000' } },
+      [DAI]: { symbol: 'DAI', decimals: 18, balances: { [TAKER]: '1000000000000000000000000' } },
+    },
+  });
   return root;
 }
 

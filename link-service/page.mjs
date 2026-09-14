@@ -429,6 +429,11 @@ function render() {
   const funded = BigInt(me.balance) >= BigInt(me.permit.amount);
   const wantChain = Number(me.bundle.typedData.domain.chainId);
   const wrongChain = walletChain !== null && Number(walletChain) !== wantChain;
+  const owner = me.owner ?? { address: account, isContract: false };
+  const ready = me.ready ?? { ok: true, problems: [], checks: [] };
+  // How many times the wallet will be asked, said before the first prompt rather than discovered
+  // halfway through. A permit is two signatures; an approval is a transaction and then a signature.
+  const prompts = approving ? 'a transaction, then a signature' : 'two signatures';
 
   // The allowance is stated as what it is. A DAI-style permit carries 'allowed: true' and no amount,
   // so it grants the maximum; calling that "exactly this amount" would be a false claim on a page
@@ -449,12 +454,35 @@ function render() {
   }
 
   app.append(frag('<h2>Your part</h2>'));
+
+  // What is already known to be wrong, before any prompt. A signature that cannot lead anywhere is
+  // not a favour to anyone, and a wallet prompt is expensive to take back.
+  if (!ready.ok) {
+    app.append(frag('<div class="note warn"><b>This offer cannot settle as it stands.</b>' +
+      ready.problems.map((problem) => '<br>— ' + esc(problem)).join('') + '</div>'));
+  }
+
+  // What this wallet's kind means, said before the first prompt instead of after a failure.
+  if (owner.isContract) {
+    app.append(frag('<div class="note">This wallet is a smart contract account, not an account with a key. ' +
+      'It approves its Shed with a transaction, and it authorises the order through its own signature check. ' +
+      (ready.account && ready.account.threshold > 1
+        ? '<br><span class="warn">Its rules need ' + esc(ready.account.threshold) + ' signatures over the same ' +
+          'message, and this page cannot collect them yet.</span>'
+        : '') + '</div>'));
+  }
+
+  app.append(frag('<div class="note">Your wallet will ask ' + esc(prompts) + '.' +
+    (approving
+      ? ' The transaction only approves your own Shed; the signature is the trade.'
+      : ' The first prompt only lets your own Shed hold the tokens; the second is the trade itself.') +
+    ' Nothing you sign costs gas.</div>'));
   app.append(frag('<div class="step' + ((approving ? approved : permitSig) ? ' done' : '') + '"><span class="n">1</span><b>' +
     (approving ? 'Approve your Shed' : 'Allow ' + amount_) + '</b>' +
     '<p class="sub" style="margin:.4rem 0 0">' + stepOne + '</p></div>'));
   app.append(frag('<div class="step' + (bundleSig ? ' done' : '') + '"><span class="n">2</span><b>Authorise the trade</b>' +
     '<p class="sub" style="margin:.4rem 0 0">Creates the order for exactly this pair, at exactly these amounts. ' +
-    'Nothing else can fill it.</p></div>'));
+    'Nothing else can fill it, and nothing moves until the other party accepts.</p></div>'));
   if (!check) {
     const checkBtn = node('<button class="ghost">Check the wallet signs with the connected account</button>');
     checkBtn.onclick = async () => {
@@ -489,10 +517,15 @@ function render() {
     return;
   }
 
+  if (me.role === 'taker') {
+    app.append(frag('<div class="note">Accepting funds both Sheds and puts the order on the book. This is the ' +
+      'moment both sides commit: the maker\u2019s tokens move out of their wallet at the same time as yours.</div>'));
+  }
+
   const go = node('<button>' + (approving
     ? 'Approve and sign'
     : me.role === 'maker' ? 'Sign and get the link' : 'Sign and settle') + '</button>');
-  go.disabled = !funded || wrongChain;
+  go.disabled = !funded || wrongChain || !ready.ok;
   go.onclick = async () => {
     go.disabled = true;
     try {
@@ -563,6 +596,9 @@ function render() {
     app.append(frag('<div class="step"><b>Send this to the other party</b>' +
       '<div class="link"><input readonly value="' + esc(share) + '">' +
       '<button class="ghost" style="width:auto">Copy</button></div></div>'));
+    // The scariest moment in the flow is the one right after signing, when nothing appears to happen.
+    app.append(frag('<div class="note">Nothing has moved yet. Your tokens leave your wallet only when the ' +
+      'other party accepts, and until then this is an offer they can take or ignore.</div>'));
     app.querySelector('.link button').onclick = (event) =>
       navigator.clipboard.writeText(share).then(() => (event.target.textContent = 'Copied'));
   }
@@ -582,6 +618,10 @@ function render() {
     '<p class="addr">offer ' + esc(id) + ' · order owner ' + esc(me.bundle.typedData.domain.verifyingContract) + '</p>' +
     '<p class="addr">bundle digest ' + esc(me.bundle.digest) + '</p>' +
     (me.permit.digest ? '<p class="addr">permit digest ' + esc(me.permit.digest) + '</p>' : '') +
+    (ready.checks.length
+      ? '<p class="addr">checked before signing:<br>' +
+        ready.checks.map((entry) => (entry.ok ? 'ok ' : 'FAILED ') + esc(entry.name) + (entry.detail ? ' (' + esc(entry.detail) + ')' : '')).join('<br>') + '</p>'
+      : '') +
     '</details>'));
 }
 
@@ -754,6 +794,12 @@ function render() {
     try {
       failure = null;
       const value = (id) => document.getElementById(id).value.trim();
+      // The offer identity is the maker's to choose, so the browser picks it and the service keeps
+      // it: a fresh random 32 bytes, never a timestamp. Without this the order hash, the
+      // ComposableCoW salt derived from it, and the hook nonce are all predictable, and two
+      // identical offers in the same second collide on a consumed nonce.
+      const salt = '0x' +
+        Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, '0')).join('');
       const offer = await post('/offers', {
         maker: account,
         taker: value('taker'),
@@ -762,6 +808,7 @@ function render() {
         buyToken: value('buyToken'),
         buyAmount: value('buyAmount'),
         validFor: String(Number(value('hours') || 24) * 3600),
+        salt,
       });
       // Keep the query string: it carries which wallet this page is acting as.
       location.href = '/o/' + offer.id + location.search;
