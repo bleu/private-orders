@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# Every counterexample from the viability review, plus the lifecycle tests that replaced the two
-# service defects it found. Each check fails loudly if the behaviour it pins comes back.
+# Every counterexample from the viability review, plus the checks that replaced the defects it found.
+# Each one fails loudly if the behaviour it pins comes back, so this is the release regression gate.
 #
 #   bash docs/review/run-counterexamples.sh
 #
-# The contract cases run real local GPv2 code in a temporary copy of src/test. The service cases run
-# the real service over HTTP against a fake `forge`/`cast` and a fixture orderbook, so they need no
-# chain and no offline stack.
+# The contract cases run real local GPv2 code in a temporary copy of src/test. The service and page
+# cases run the real service over HTTP against a fake `forge`/`cast` and a fixture orderbook, and the
+# page cases drive the real page in headless Chrome. Nothing here broadcasts a transaction or needs a
+# chain; the browser checks are skipped only when no Chrome is installed.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# The page builds a program inside a template literal, so an unescaped backtick in a comment breaks
+# the page and nothing else. This is the cheapest possible way to catch that, so it runs first.
+node "$ROOT/scripts/check-page.mjs"
+
 REVIEW_DIR="$(mktemp -d "${TMPDIR:-/tmp}/private-trade-review.XXXXXX")"
 trap 'rm -rf "$REVIEW_DIR"' EXIT
 cp -R "$ROOT/src" "$ROOT/test" "$REVIEW_DIR/"
@@ -18,3 +24,4 @@ cp "$ROOT/docs/review/ReviewCounterexamples.t.sol" "$REVIEW_DIR/test/ReviewCount
 forge test --root "$REVIEW_DIR" --match-contract ReviewCounterexamples -vv
 node "$ROOT/docs/review/service-counterexamples.mjs"
 node "$ROOT/docs/review/service-lifecycle.mjs"
+node "$ROOT/docs/review/page-safety.mjs"

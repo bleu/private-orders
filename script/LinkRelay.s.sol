@@ -70,6 +70,12 @@ contract LinkRelay is Script {
     string memory permitKind = vm.parseJsonString(computed, string.concat(bundleKey, ".permitKind"));
     if (keccak256(bytes(permitKind)) == keccak256("none")) return;
 
+    // A permit whose typed data cannot be reproduced from the token's own domain separator is a
+    // permit no wallet can be shown, so no signature for it can exist. That side funds by an
+    // `approve` transaction before the relay runs, and the allowance check below is what reports it
+    // if it has not happened — with a message naming the token and the Shed to approve.
+    if (!vm.parseJsonBool(computed, string.concat(bundleKey, ".permitTypedDataAvailable"))) return;
+
     TokenPermit.Permit memory permit = _permitFrom(computed, bundleKey);
 
     // Already granted by an earlier `approve`, or already submitted: nothing to do.

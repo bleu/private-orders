@@ -16,7 +16,11 @@ Proved by `docs/review/service-lifecycle.mjs` (9 checks over the real HTTP surfa
 **Goal**: Support honest ERC20 signing and funding flows without unsafe rendering or false allowance claims.
 **Success Criteria**: Permit and approve modes both work; untrusted metadata renders as text; chain/account checks gate signing; allowance scope is displayed accurately.
 **Tests**: EIP-2612, DAI permit, no-permit approval, malicious symbol, chain mismatch, account change, supported extension-wallet flow.
-**Status**: Not Started
+**Status**: Complete
+
+Proved by `docs/review/page-safety.mjs` — the real page in headless Chrome over the DevTools Protocol, no dependency — plus `TokenPermit.t.sol` for the two permit shapes. Permit and approve both fund: the service decides which, describes the `approve` as calldata, and the page sends exactly that and then waits for the allowance rather than trusting the transaction. DAI-style permits are disclosed as unlimited; a permit whose typed data cannot be produced falls back to `approve` instead of a `personal_sign` over a raw digest that no contract would accept. Untrusted text is escaped before it reaches the DOM. Signing is gated on the wallet's chain and re-checks the active account immediately before each signature.
+
+Every check was run against the pre-fix code and fails there. Open: a real extension wallet, named supported wallets, and a deliberate smart-wallet/Safe story.
 
 ## Stage 4: Submission and product contract
 **Goal**: Separate the direct private path from the public JIT experiment and define the real operator, fee, privacy, attribution, and staging contract.

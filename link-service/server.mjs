@@ -348,7 +348,9 @@ function preflight(offer, role, body) {
     };
   }
 
-  if (side.permitKind !== 'none' && side.permitTypedData) {
+  // Only when the permit is what funds this side. A token whose permit cannot be presented as typed
+  // data is funded by an `approve` transaction, and there is no permit signature to ask for.
+  if (funding(offer.computed, role).mode === 'permit' && side.permitTypedData) {
     if (verifies(side.permitTypedData, body.permitSignature, owner) === false) {
       problems.push(
         verifies(side.bundleTypedData, body.permitSignature, owner)
@@ -439,16 +441,37 @@ const receiptSucceeded = (receipt) => {
   return status === 1 || status === '1' || status === '0x1';
 };
 
+/// ERC-20 `approve(address,uint256)` calldata. Built here, once, so the page sends exactly what the
+/// server described instead of assembling a transaction of its own.
+const approveCalldata = (spender, amount) => {
+  const word = (hex) => hex.replace(/^0x/, '').toLowerCase().padStart(64, '0');
+  return `0x095ea7b3${word(spender)}${word(BigInt(amount).toString(16))}`;
+};
+
 /// Symbol and decimals, read once per token and kept on the offer. Raw amounts are unreadable —
 /// `100000000` is not a price — and a client should never be the one to guess a token's decimals.
+/// A string return value as `cast` prints it: a JSON string, so the quotes are a JSON frame and not
+/// part of the value. Decoding it is what keeps a symbol containing a quote or a backslash intact —
+/// trimming the quotes alone would leave the escapes in the text the page then has to render.
+function castString(raw) {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return trimmed.replace(/^"|"$/g, '');
+    }
+  }
+  return trimmed;
+}
+
 function tokenMeta(offer, token) {
   offer.tokens ??= {};
   const key = token.toLowerCase();
   if (!offer.tokens[key]) {
     offer.tokens[key] = {
       address: token,
-      // `cast` returns a string return value quoted.
-      symbol: cast(['call', token, 'symbol()(string)', '--rpc-url', RPC]).trim().replace(/^"|"$/g, ''),
+      symbol: castString(cast(['call', token, 'symbol()(string)', '--rpc-url', RPC])),
       decimals: Number(cast(['call', token, 'decimals()(uint8)', '--rpc-url', RPC]).split(' ')[0]),
     };
   }
@@ -457,6 +480,12 @@ function tokenMeta(offer, token) {
 
 const balanceOf = (token, holder) =>
   cast(['call', token, 'balanceOf(address)(uint256)', holder, '--rpc-url', RPC]).split(' ')[0];
+
+/// What `spender` may already move out of `owner`. Read for the Shed the bundle funds: a permit can
+/// be front-run, and an `approve` may already be in place, so the fact that matters is the allowance,
+/// not which of the two put it there.
+const allowanceOf = (token, owner, spender) =>
+  cast(['call', token, 'allowance(address,address)(uint256)', owner, spender, '--rpc-url', RPC]).split(' ')[0];
 
 /// The offer's progress, derived from the chain rather than from the service's own bookkeeping.
 async function status(offer) {
@@ -488,31 +517,47 @@ async function status(offer) {
 
 /// What a party must do before signing.
 ///
-/// Where the token supports `permit`, the party signs an EIP-712 permit and the relayer submits it,
-/// so the party needs no transaction at all. Where it does not, the party approves their Shed first —
-/// the fallback that works for every token. The two cases are reported distinctly so a client never
-/// has to guess which one it is in.
+/// A token whose permit can be shown as typed data is funded by signature: the party signs, the
+/// relayer submits, and they never send a transaction. A token with no permit — or one whose EIP-712
+/// domain cannot be reproduced from its own `DOMAIN_SEPARATOR()`, so no wallet can be shown what it
+/// is signing — is funded by an ordinary `approve` transaction first.
+///
+/// The two cases are reported distinctly, with the calldata to send, so a client never has to guess
+/// which one it is in or hand-build a transaction the server should have described.
 const funding = (computed, role) => {
   const side = role === 'maker' ? computed.makerBundle : computed.takerBundle;
   const common = { token: side.sellToken, owner: side.owner, spender: side.shed, amount: side.sellAmount };
 
-  if (side.permitKind === 'none') {
+  if (side.permitKind === 'none' || side.permitTypedDataAvailable !== true) {
     return {
       mode: 'approve',
       ...common,
-      note: 'this token has no permit: approve your Shed first, then sign',
-      approve: `approve(${side.shed}, ${side.sellAmount}) on ${side.sellToken}`,
+      reason:
+        side.permitKind === 'none'
+          ? 'this token has no permit'
+          : 'this token has a permit, but its typed data cannot be reproduced from its own domain separator, so a wallet cannot be shown what it is signing',
+      note: 'approve your Shed, then sign the authorisation. The approval is a transaction, so this side pays gas once.',
+      approve: { to: side.sellToken, data: approveCalldata(side.shed, side.sellAmount), value: '0x0' },
+      allowance: 'exact',
     };
   }
 
+  // A DAI-style permit carries `allowed: true` and no amount, which sets the allowance to the
+  // maximum. Saying "exactly this amount" would be false, so it is said plainly instead.
+  const unlimited = side.permitKind === 'dai';
   return {
     mode: 'permit',
     ...common,
     kind: side.permitKind,
     deadline: side.deadline,
     digest: side.permitDigest,
-    note: `sign the permit and the bundle; the relayer submits both, so you need no transaction`,
-    verify: 'the permit can only move this amount into your own Shed, so publishing it is safe',
+    allowance: unlimited ? 'unlimited' : 'exact',
+    note: unlimited
+      ? 'sign the permit and the bundle; the relayer submits both, so you need no transaction. This token\u2019s permit has no amount, so it grants your Shed an unlimited allowance until you revoke it.'
+      : 'sign the permit and the bundle; the relayer submits both, so you need no transaction.',
+    verify: unlimited
+      ? 'the allowance is unlimited, but your own Shed holds it and only this offer can spend it'
+      : `the permit moves at most ${side.sellAmount} into your own Shed, so publishing it is safe`,
   };
 };
 
@@ -547,6 +592,23 @@ const server = http.createServer(async (req, res) => {
       const key = DEV_KEYS.get(String(body.address ?? '').toLowerCase());
       if (!key) return json(res, 404, { error: 'no development key for that address' });
       return json(res, 200, { address: body.address, signature: devSign(key, body) });
+    }
+
+    // The development wallet's other half: broadcast a transaction it was asked to send. Same trust
+    // as `/dev/sign`, since the service already holds this key, and only when development keys are
+    // configured. Without it the browser flow cannot exercise a token that needs an `approve`.
+    if (DEV_WALLET && req.method === 'POST' && parts[0] === 'dev' && parts[1] === 'send') {
+      const body = await readBody(req);
+      const key = DEV_KEYS.get(String(body.from ?? '').toLowerCase());
+      if (!key) return json(res, 404, { error: 'no development key for that address' });
+      if (!/^0x[0-9a-fA-F]{40}$/.test(body.to ?? '') || !/^0x([0-9a-fA-F]{2})*$/.test(body.data ?? '')) {
+        return json(res, 400, { error: 'to must be an address and data must be even-length hex' });
+      }
+      try {
+        return json(res, 200, JSON.parse(cast(['send', body.to, body.data, '--private-key', key, '--rpc-url', RPC, '--json'])));
+      } catch (err) {
+        return json(res, 502, { error: relayReason(String(err.stderr ?? err.message ?? '')) });
+      }
     }
 
     // Typed-data probes, simplest first. Every one of these is canonical EIP-712, so a wallet that
@@ -642,7 +704,7 @@ const server = http.createServer(async (req, res) => {
         computedHash,
         link: `${PUBLIC_URL}/o/${id}`,
         funding: funding(computed, 'maker'),
-        permitRequired: computed.makerBundle.permitKind !== 'none',
+        permitRequired: funding(computed, 'maker').mode === 'permit',
         makerBundle: {
           shed: computed.makerBundle.shed,
           nonce: computed.makerBundle.nonce,
@@ -666,6 +728,9 @@ const server = http.createServer(async (req, res) => {
         if (!role) return json(res, 200, { role: null, terms: publicTerms(offer) });
 
         const side = role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
+        // One decision, stated once. `funding` is the only place that reads a permit kind; the
+        // permit block reports its conclusion rather than deciding the same thing a second way.
+        const money = funding(offer.computed, role);
         return json(res, 200, {
           role,
           terms: publicTerms(offer),
@@ -679,6 +744,9 @@ const server = http.createServer(async (req, res) => {
             digest: side.permitDigest,
             typedData: side.permitTypedData ?? null,
             typedDataAvailable: side.permitTypedDataAvailable === true,
+            // A DAI-style permit has no amount and grants the maximum. The client says so rather
+            // than presenting an amount-limited approval that never happens.
+            unlimited: money.allowance === 'unlimited',
             token: side.sellToken,
             amount: side.sellAmount,
             symbol: tokenMeta(offer, side.sellToken).symbol,
@@ -686,8 +754,11 @@ const server = http.createServer(async (req, res) => {
             spender: side.shed,
             deadline: Number(side.deadline),
           },
-          funding: funding(offer.computed, role),
+          funding: money,
           balance: balanceOf(side.sellToken, who),
+          // What the Shed may already move. `approve` mode is finished when this reaches the amount,
+          // and a permit that was front-run shows up here too.
+          allowance: allowanceOf(side.sellToken, side.owner, side.shed),
           signed: offer.signatures?.[role] !== undefined,
           makerSigned: offer.signatures?.maker !== undefined,
           orderUid: offer.orderUid ?? null,
@@ -829,10 +900,11 @@ const server = http.createServer(async (req, res) => {
           return json(res, 400, { error: 'signature must be 65 bytes, r || s || v' });
         }
         const side = body.role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
-        if (side.permitKind !== 'none' && !/^0x[0-9a-fA-F]{130}$/.test(body.permitSignature ?? '')) {
+        if (funding(offer.computed, body.role).mode === 'permit' && !/^0x[0-9a-fA-F]{130}$/.test(body.permitSignature ?? '')) {
           return json(res, 400, {
-            error: `the sell token supports permit, so a permitSignature is required alongside it`,
+            error: `this side is funded by a permit, so a permitSignature is required alongside the authorisation`,
             permitKind: side.permitKind,
+            funding: funding(offer.computed, body.role),
           });
         }
         const wrong = preflight(offer, body.role, body);
@@ -873,11 +945,10 @@ const server = http.createServer(async (req, res) => {
         if (body.permitSignature) offer.permits.taker = body.permitSignature;
 
         for (const role of ['maker', 'taker']) {
-          const side = role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
-          if (side.permitKind !== 'none' && !offer.permits[role]) {
+          if (funding(offer.computed, role).mode === 'permit' && !offer.permits[role]) {
             return json(res, 400, {
-              error: `the ${role}'s sell token supports permit, so its permitSignature is required`,
-              permitKind: side.permitKind,
+              error: `the ${role}'s side is funded by a permit, so its permitSignature is required`,
+              permitKind: offer.computed[role === 'maker' ? 'makerBundle' : 'takerBundle'].permitKind,
               funding: funding(offer.computed, role),
             });
           }

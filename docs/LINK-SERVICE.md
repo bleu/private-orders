@@ -20,19 +20,19 @@ maker: POST /offers ──────────► link ───────
 ```
 
 That script is the whole story: it deploys the contracts, allowlists the wrapper, starts the
-sub-solver and the service, then acts as both parties. Against the offline stack it ends with:
+sub-solver and the service, then acts as both parties. It asserts, rather than reports:
 
-```
-   neither party sent a transaction (maker nonce 6, taker nonce 6)
-==> settled
-   maker shed USDC 600000000 -> 600000000   (sold)
-   maker shed DAI  400000000000000000000 -> 500000000000000000000   (received)
-   taker shed DAI  400000000000000000000 -> 400000000000000000000   (sold)
-   taker shed USDC 400000000 -> 500000000   (received)
-```
+- both permits were applied by the relayer, per side, so neither party's `approve` was needed
+- neither party's transaction count moved — neither of them sent a transaction
+- the maker's wallet gained the buy token and the taker's wallet gained the sell token
+- neither Shed gained anything: the proceeds are paid to the wallets, not to the contracts that hold
+  the orders
 
-The sell side nets to zero on purpose: the party funded their Shed and the Shed spent it, both inside
-the one signed bundle. The received side is the trade.
+Run it against the offline stack; it needs the orderbook and the settlements contracts up.
+
+It was not re-run for the wallet-safety revision: Docker was not available on this machine, so the
+browser and real-chain path is asserted by `docs/review/page-safety.mjs` (real Chrome, fixture chain)
+rather than by that script.
 
 ## Funding, and why neither party pays gas
 
@@ -47,45 +47,61 @@ approve(vaultRelayer, sellAmount)         // let settlement take it
 create(orderParams)                       // authorise the order
 ```
 
-**The allowance to the Shed comes from a `permit`.** Where the token supports it, the party signs an
-EIP-712 permit instead of sending an `approve`, and the relayer submits it. So a party does two
-signatures and zero transactions:
+**The allowance to the Shed comes from a `permit`.** Where the token supports it *and* its typed data
+can be reproduced from the token's own `DOMAIN_SEPARATOR()`, the party signs an EIP-712 permit
+instead of sending an `approve`, and the relayer submits it. So a party does two signatures and zero
+transactions:
 
 | | |
 | --- | --- |
 | Bundle digest | Funds the Shed and authorises the order |
 | Permit digest | Grants the Shed its allowance |
 
-The permit signature is safe to publish: it can only move that amount into the party's own Shed, and
-the bundle's `transferFrom` is the thing that spends it. It is also permissionless to submit, so no
-one can hold it hostage.
-
 Both shapes in the wild are supported, detected from the token rather than assumed:
 
 - **EIP-2612** — `permit(owner, spender, value, deadline, v, r, s)`. USDC, and most modern tokens.
-- **DAI-style** — `permit(holder, spender, nonce, expiry, allowed, v, r, s)`. DAI.
+  The allowance is exactly the trade amount.
+- **DAI-style** — `permit(holder, spender, nonce, expiry, allowed, v, r, s)`. DAI. This shape has no
+  amount: `allowed: true` sets the allowance to the maximum. The service reports
+  `"allowance": "unlimited"` and the page says so, because claiming an amount-limited approval that
+  does not happen is the kind of untruth the page exists to avoid.
 
 The digest is built from the token's own `DOMAIN_SEPARATOR()`, so there is no second EIP-712 domain to
 get wrong.
 
-**Where permit is unavailable, nothing breaks.** The party sends one `approve` to their Shed and then
-signs as before. The service reports which case applies, so a client never has to guess:
+**Where permit is unavailable, the party approves and then signs.** Two cases reach this path, and
+the service reports which:
+
+- the token has no permit function at all
+- the token has one, but its EIP-712 domain fields cannot be reproduced from its own
+  `DOMAIN_SEPARATOR()`, so no wallet can be shown what it is signing
 
 ```json
-"funding": { "mode": "permit", "kind": "eip2612", "digest": "0x…", "spender": "0x…" }
-"funding": { "mode": "approve", "approve": "approve(0x…, 100000000) on 0x…" }
+"funding": { "mode": "permit", "kind": "eip2612", "allowance": "exact", "digest": "0x…" }
+"funding": { "mode": "permit", "kind": "dai", "allowance": "unlimited", "digest": "0x…" }
+"funding": { "mode": "approve", "reason": "this token has no permit",
+             "approve": { "to": "0x…", "data": "0x095ea7b3…", "value": "0x0" } }
 ```
 
-Two things decide whether permit is used, and both are deliberate:
+`approve.data` is the `approve(spender, amount)` calldata, built by the service. The page sends that
+transaction and never assembles one of its own, so what the reader approves is what the server
+intended. It then polls the allowance rather than trusting the transaction: a replaced, dropped or
+wrong-account approval leaves the allowance short, and that is what the flow waits for.
+
+Three things decide whether permit is used, and all are deliberate:
 
 - **Detection is a `staticcall` on the selector.** A token that writes storage before validating
   reverts with no data under a static call, which looks exactly like the function not existing. Such
   a token is reported as unsupported and the party falls back to `approve`. The cost is one needless
   transaction; the alternative is a signature no contract accepts.
+- **No typed data means no permit signature.** There is no way to ask a wallet to sign a bare EIP-712
+  digest correctly: `personal_sign` adds the EIP-191 header, and the signature then recovers to a
+  different address. That path is not offered.
 - **The relay checks the allowance afterwards, not the permit call's result.** A permit can be
   front-run, and a front-runner grants exactly the same allowance. So the relay treats a failed
   permit call as fine and then asserts the allowance, failing with the token and spender to approve
-  directly if it is missing.
+  directly if it is missing. An `approve` already in place short-circuits the permit entirely, which
+  is what makes the approve path and the retry path the same code.
 
 ## Two things that will bite an integrator
 
@@ -93,7 +109,6 @@ Two things decide whether permit is used, and both are deliberate:
 unless `--no-hash` is passed. The wrong choice produces a signature that recovers to a different
 address, and the Shed reports it only as `InvalidSignature()` — with no hint that signing was the
 problem. `script/SignDigest.s.sol` signs raw and exists as the unambiguous reference.
-
 **A party's Shed is not their address.** The *Shed* owns the order; the EOA only signs. The first
 version of `LinkCompute` set the taker's Shed to the taker's EOA, and the relay failed with
 `InvalidSignature()` because the recovered signer was not the Shed's admin. `LinkRelay` now checks
@@ -157,15 +172,35 @@ before it touches the permit, so a retry after partial funding converges instead
 consumed permit. The order UID is derived from the order, so re-posting an accepted offer is the same
 order.
 
+## Truthfulness, and where the page comes from
+
+A page that asks for a signature has one job, and it is not looking nice: it has to say what is about
+to be authorised. Three rules follow from that, and they are enforced by
+`docs/review/page-safety.mjs` in a real browser.
+
+**Untrusted text never becomes markup.** A token's symbol is chosen by whoever deployed the token, and
+it lands on a signing page. Symbols, wallet names, error strings, addresses and transaction hashes all
+go through one escape function before they reach the DOM; the browser check feeds the page a symbol
+containing an `<img onerror>` and asserts that no element appears and no script runs.
+
+**The allowance is described as what it is.** `exact` for EIP-2612 permits and approvals, `unlimited`
+for DAI-style permits, words rather than a number for the unlimited case.
+
+**The chain is checked before signing, not after failing.** The page compares the wallet's
+`eth_chainId` with the chain the trade was signed for and refuses to sign on a mismatch, naming both
+chains. It re-reads the active account immediately before every signature, because a wallet signs
+with whichever account is selected rather than the one the page connected with.
+
 ## Known gaps
 
 - **A party signs twice.** The bundle and the permit are separate EIP-712 domains (the Shed's and the
   token's), so they cannot be merged into one message. Two signatures and no transaction beats one
   signature and a transaction for a taker with no ETH, but it is not the theoretical minimum.
 - **Received tokens land in the Shed, which is one extra step.** Every order is built with
-  `receiver: address(0)`, meaning "pay the owner" — and the owner is the Shed. Setting the receiver to
-  the party's wallet would put the tokens there directly and remove the withdrawal entirely. It is a
-  terms change, so it needs a redeploy and re-signing, which is why the button came first.
+  `receiver` set to the party's own wallet — `makerBeneficiary` is the maker's address and
+  `takerBeneficiary` the taker's — so the proceeds arrive in the wallet and the Shed does not gain.
+  What the withdrawal button is for is the other case: sell tokens the trade never spent. Setting the
+  receiver was a terms change, which is why the button came first.
 - **A permit signed at offer time can expire before settlement.** Its deadline is the offer's, so a
   long-lived offer needs a fresh permit rather than a stale one.
 - **Storage is local files.** Offers live under `out-json/link/`. Records and sub-solver files are

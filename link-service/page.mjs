@@ -63,8 +63,14 @@ const CSS = `
 const devWalletShim = (enabled) => (enabled ? `
 <script>
 (function () {
+  // The dev-wallet shim reports the chain the trade should be on, so a chain mismatch is testable
+  // without a second chain: '?chain=0x1' against a trade signed for another one.
   const account = new URLSearchParams(location.search).get('devwallet');
+  const chain = new URLSearchParams(location.search).get('chain') || '0x1';
   if (!account) return;
+  // Which account the wallet will sign with. Switched by a test through useAccount, the way a
+  // reader switches it in the wallet itself.
+  let current = account;
   const sign = async (body) => {
     const res = await fetch('/dev/sign', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const out = await res.json();
@@ -74,11 +80,21 @@ const devWalletShim = (enabled) => (enabled ? `
   const provider = {
     isDevWallet: true,
     on() {},
+    // A development affordance, the same shape as a real wallet holding several keys: the page's
+    // pre-signature account check exists because a wallet signs with whichever account is selected.
+    useAccount(next) { current = next; },
     request: async ({ method, params }) => {
-      if (method === 'eth_requestAccounts' || method === 'eth_accounts') return [account];
-      if (method === 'eth_chainId') return '0x1';
-      if (method === 'eth_signTypedData_v4') return sign({ address: account, typedData: JSON.parse(params[1]) });
-      if (method === 'personal_sign') return sign({ address: account, message: params[0] });
+      if (method === 'eth_requestAccounts' || method === 'eth_accounts') return [current];
+      if (method === 'eth_chainId') return chain;
+      if (method === 'eth_signTypedData_v4') return sign({ address: current, typedData: JSON.parse(params[1]) });
+      if (method === 'personal_sign') return sign({ address: current, message: params[0] });
+      if (method === 'eth_sendTransaction') {
+        const tx = params[0];
+        const res = await fetch('/dev/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ from: tx.from, to: tx.to, data: tx.data }) });
+        const out = await res.json();
+        if (!res.ok) throw new Error(out.error || 'the development wallet could not send that transaction');
+        return out.transactionHash;
+      }
       throw new Error('the development wallet does not implement ' + method);
     },
   };
@@ -109,6 +125,13 @@ const id = ${JSON.stringify(id)};
 // element asks for it with node().
 const frag = (h) => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content; };
 const node = (h) => frag(h).firstElementChild;
+
+// Everything on this page that came from outside — a token's symbol, a wallet's name, an error
+// string, an address, a transaction hash — arrives as text, through here. The page exists to show a
+// reader what they are about to sign, and a token's symbol is chosen by whoever deployed the token:
+// unescaped, an image tag in a symbol is a script running on a signing page.
+const esc = (value) =>
+  String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const get = async (p) => (await fetch(p)).json();
 let synthetic = [];
 let probeCache = [];
@@ -124,7 +147,7 @@ const post = async (p, body) => {
 // creates a global — so a missing declaration shows up as a broken render, not a missing value.
 let offer = null, me = null, account = null, usable = null, walletName = null, failure = null;
 let check = null, probeResults = [], plan = null, moved = null;
-let permitSig = null, bundleSig = null;
+let permitSig = null, bundleSig = null, walletChain = null;
 
 // --- wallet discovery ---------------------------------------------------------------------------
 
@@ -156,7 +179,10 @@ async function connect(wallet) {
     walletName = wallet.name;
     account = accounts[0];
     usable.on?.('accountsChanged', (list) => { account = list[0] ?? null; me = null; loadRole(); });
-    usable.on?.('chainChanged', () => loadRole());
+    usable.on?.('chainChanged', (hex) => { walletChain = hex ?? null; loadRole(); });
+    // Read once at connect, so a wallet on the wrong network is a sentence before the first
+    // signature rather than a rejected order several steps later.
+    walletChain = await usable.request({ method: 'eth_chainId' }).catch(() => null);
     await loadRole();
   } catch (err) {
     failure = describe(err);
@@ -203,7 +229,11 @@ async function load() {
   if (existing) {
     try {
       const [first] = await existing.provider.request({ method: 'eth_accounts' });
-      if (first) { usable = existing.provider; walletName = existing.name; account = first; await loadRole(); }
+      if (first) {
+        usable = existing.provider; walletName = existing.name; account = first;
+        walletChain = await usable.request({ method: 'eth_chainId' }).catch(() => null);
+        await loadRole();
+      }
     } catch { /* a wallet that refuses this is still connectable by button */ }
   }
 }
@@ -217,6 +247,21 @@ async function loadRole() {
     ? await get('/offers/' + id + '/withdraw?address=' + account).catch(() => null)
     : null;
   render();
+}
+
+/// Poll the role view until the Shed's allowance covers the trade. The approve transaction's hash is
+/// not evidence that it worked — the allowance is, and a replaced or dropped approval shows up here
+/// as the allowance that never arrived.
+async function waitForAllowance() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const fresh = await get('/offers/' + id + '/role?address=' + account).catch(() => null);
+    if (fresh) {
+      me = fresh;
+      if (BigInt(fresh.allowance ?? '0') >= BigInt(fresh.permit.amount)) return true;
+    }
+    await new Promise((resume) => setTimeout(resume, 1500));
+  }
+  return false;
 }
 
 /// Symbol and decimals for a token address, using what the trade already told us about its two.
@@ -242,9 +287,9 @@ function terms() {
       : ['One side gives', 'The other gives'];
   return frag(\`
     <div class="trade">
-      <div class="row"><span>\${payLabel}</span><span class="amt">\${amount(pay[0], pay[1])} \${pay[2]}</span></div>
-      <div class="row"><span>\${getLabel}</span><span class="amt">\${amount(get_[0], get_[1])} \${get_[2]}</span></div>
-      \${settled ? '' : '<div class="row"><small>Expires</small><small>' + until(t.expiresAt) + '</small></div>'}
+      <div class="row"><span>\${payLabel}</span><span class="amt">\${esc(amount(pay[0], pay[1]))} \${esc(pay[2])}</span></div>
+      <div class="row"><span>\${getLabel}</span><span class="amt">\${esc(amount(get_[0], get_[1]))} \${esc(get_[2])}</span></div>
+      \${settled ? '' : '<div class="row"><small>Expires</small><small>' + esc(until(t.expiresAt)) + '</small></div>'}
     </div>\`);
 }
 
@@ -253,7 +298,7 @@ function render() {
   app.replaceChildren();
   if (!offer) return;
   app.append(terms());
-  if (failure) app.append(frag('<div class="note warn">' + failure + '</div>'));
+  if (failure) app.append(frag('<div class="note warn">' + esc(failure) + '</div>'));
 
   if (!account) {
     const found = wallets();
@@ -261,7 +306,7 @@ function render() {
       '<p class="sub" style="margin:.4rem 0 0">The terms above are public to anyone holding the link. ' +
       'Your side of it appears once the wallet is connected.</p></div>'));
     for (const wallet of found) {
-      const b = node('<button>Connect ' + wallet.name + '</button>');
+      const b = node('<button>Connect ' + esc(wallet.name) + '</button>');
       b.onclick = () => connect(wallet);
       app.append(b);
     }
@@ -270,15 +315,15 @@ function render() {
         '<p class="sub" style="margin:.5rem 0 0">If one is installed, check that the extension can reach ' +
         'this site — some wallets are disabled on <code>localhost</code> until allowed — or open the link ' +
         'inside the wallet\\'s own browser.</p>' +
-        '<p class="sub" style="margin:.5rem 0 0">EIP-6963 announcements seen: ' + discovered.length + '.</p></div>'));
+        '<p class="sub" style="margin:.5rem 0 0">EIP-6963 announcements seen: ' + esc(discovered.length) + '.</p></div>'));
     }
     return;
   }
 
-  app.append(frag('<div class="note">Connected as <span class="addr">' + short(account) + '</span>' +
-    (walletName ? ' with ' + walletName : '') +
+  app.append(frag('<div class="note">Connected as <span class="addr">' + esc(short(account)) + '</span>' +
+    (walletName ? ' with ' + esc(walletName) : '') +
     (check
-      ? '<br>Signs as <span class="addr">' + (check.recovered ? short(check.recovered) : 'unreadable') + '</span> ' +
+      ? '<br>Signs as <span class="addr">' + esc(check.recovered ? short(check.recovered) : 'unreadable') + '</span> ' +
         (check.matches ? '<span class="ok">— matches</span>' : '<span class="warn">— DIFFERENT from the connected account</span>')
       : '') +
     '</div>'));
@@ -295,13 +340,13 @@ function render() {
   }
 
   app.append(frag('<h2>Counterparty</h2><div class="trade"><div class="row">' +
-    '<span class="addr">' + me.counterparty + '</span></div></div>'));
+    '<span class="addr">' + esc(me.counterparty) + '</span></div></div>'));
 
   if (offer.status === 'settled') {
     app.append(frag('<h2>Receipt</h2><div class="trade">' +
       '<div class="row"><span>Settlement</span><span class="addr">' +
-      (offer.settlementTx ? offer.settlementTx : 'recorded, transaction not found') + '</span></div>' +
-      '<div class="row"><small>Order</small><small class="addr">' + short(offer.orderUid ?? '') + '</small></div>' +
+      esc(offer.settlementTx ? offer.settlementTx : 'recorded, transaction not found') + '</span></div>' +
+      '<div class="row"><small>Order</small><small class="addr">' + esc(short(offer.orderUid ?? '')) + '</small></div>' +
       '</div>'));
     const held = plan && !plan.empty ? plan.amounts.map((a, i) => ({ ...tokenOf(plan.targets[i]), amount: a })) : [];
     if (moved) {
@@ -309,10 +354,10 @@ function render() {
     } else if (!held.length) {
       app.append(frag('<div class="note">Your Shed is empty — everything is in your wallet.</div>'));
     } else {
-      const what = held.map((h) => amount(h.amount, h.decimals) + ' ' + h.symbol).join(' and ');
+      const what = held.map((h) => esc(amount(h.amount, h.decimals)) + ' ' + esc(h.symbol)).join(' and ');
       app.append(frag('<div class="note">' + what + ' ' + (held.length > 1 ? 'are' : 'is') +
-        ' sitting in your Shed, a contract only you control. One signature moves ' +
-        (held.length > 1 ? 'them' : 'it') + ' to your wallet, and you still pay no gas.</div>'));
+        ' still in your Shed: ' + (held.length > 1 ? 'tokens' : 'a token') + ' this trade did not spend. ' +
+        'One signature moves ' + (held.length > 1 ? 'them' : 'it') + ' to your wallet, and you still pay no gas.</div>'));
       const move = node('<button>Move ' + what + ' to my wallet</button>');
       move.onclick = async () => {
         move.disabled = true;
@@ -337,8 +382,6 @@ function render() {
     }
     return;
   }
-
-  const funded = BigInt(me.balance) >= BigInt(me.permit.amount);
 
   // One signature per press. Four queued prompts is where wallets stall, and a stall is
   // indistinguishable from a wallet that cannot sign the message at all.
@@ -368,11 +411,40 @@ function render() {
     render();
   };
 
+  // What funding this side takes. A permit is one signature; an approve is one transaction first.
+  // The server decides which case it is and describes the transaction, so this page never has to
+  // infer it from a token — or assemble a transaction of its own.
+  const funding = me.funding ?? { mode: 'permit' };
+  const approving = funding.mode === 'approve';
+  const unlimited = me.permit.unlimited === true;
+  const amount_ = esc(amount(me.permit.amount, me.permit.decimals)) + ' ' + esc(me.permit.symbol);
+  const approved = BigInt(me.allowance ?? '0') >= BigInt(me.permit.amount);
+  const funded = BigInt(me.balance) >= BigInt(me.permit.amount);
+  const wantChain = Number(me.bundle.typedData.domain.chainId);
+  const wrongChain = walletChain !== null && Number(walletChain) !== wantChain;
+
+  // The allowance is stated as what it is. A DAI-style permit carries 'allowed: true' and no amount,
+  // so it grants the maximum; calling that "exactly this amount" would be a false claim on a page
+  // whose whole job is to say what the reader is about to authorise.
+  const stepOne = approving
+    ? 'One transaction: approve your own Shed for exactly ' + amount_ + '. ' + esc(funding.reason ?? '') + '.'
+    : unlimited
+      ? 'Signs a permit that lets your own Shed move any amount of this token, until you revoke it. It still cannot move them anywhere but your Shed, and anyone may submit it.'
+      : 'Signs a permit that lets your own Shed move exactly ' + amount_ + ', and nothing else. It cannot move them anywhere else, and anyone may submit it.';
+
+  if (wrongChain) {
+    app.append(frag('<div class="note warn">Your wallet is on chain ' + esc(Number(walletChain)) +
+      ', but this trade is on chain ' + esc(wantChain) + '. A signature made now would be rejected there. ' +
+      'Switch the network in the wallet, then reload.</div>'));
+  } else if (walletChain === null) {
+    app.append(frag('<div class="note warn">This page could not read the wallet’s chain id, so it cannot ' +
+      'check that the wallet is on chain ' + esc(wantChain) + '. The signature will be rejected if it is not.</div>'));
+  }
+
   app.append(frag('<h2>Your part</h2>'));
-  app.append(frag('<div class="step' + (permitSig ? ' done' : '') + '"><span class="n">1</span><b>Allow ' +
-    amount(me.permit.amount, me.permit.decimals) + ' ' + me.permit.symbol + '</b>' +
-    '<p class="sub" style="margin:.4rem 0 0">Signs a permit so your own Shed can hold the tokens. ' +
-    'It cannot move them anywhere else, and anyone may submit it.</p></div>'));
+  app.append(frag('<div class="step' + ((approving ? approved : permitSig) ? ' done' : '') + '"><span class="n">1</span><b>' +
+    (approving ? 'Approve your Shed' : 'Allow ' + amount_) + '</b>' +
+    '<p class="sub" style="margin:.4rem 0 0">' + stepOne + '</p></div>'));
   app.append(frag('<div class="step' + (bundleSig ? ' done' : '') + '"><span class="n">2</span><b>Authorise the trade</b>' +
     '<p class="sub" style="margin:.4rem 0 0">Creates the order for exactly this pair, at exactly these amounts. ' +
     'Nothing else can fill it.</p></div>'));
@@ -391,20 +463,29 @@ function render() {
     app.append(checkBtn);
   }
 
-  app.append(frag('<div class="note">Your wallet holds ' + amount(me.balance, me.permit.decimals) + ' ' +
-    me.permit.symbol + (funded ? ' <span class="ok">— enough</span>'
-      : ' <span class="warn">— you need ' + amount(me.permit.amount, me.permit.decimals) + '</span>') + '</div>'));
+  app.append(frag('<div class="note">Your wallet holds ' + esc(amount(me.balance, me.permit.decimals)) + ' ' +
+    esc(me.permit.symbol) + (funded ? ' <span class="ok">— enough</span>'
+      : ' <span class="warn">— you need ' + esc(amount(me.permit.amount, me.permit.decimals)) + '</span>') + '</div>'));
+
+  // Only an approve path has an allowance worth reading before anything is signed: a permit's
+  // allowance does not exist until the relayer submits the permit the reader is about to sign.
+  if (approving) {
+    app.append(frag('<div class="note">Your Shed may currently move ' +
+      (approved ? esc(amount(me.allowance, me.permit.decimals)) + ' ' + esc(me.permit.symbol) : 'nothing') +
+      '.</div>'));
+  }
 
   if (offer.status === 'settled') {
     app.append(frag('<div class="note ok">Settled.' +
-      (offer.settlementTx ? '<br>Transaction <span class="addr">' + offer.settlementTx + '</span>' : '') +
-      '<br><span class="muted">What you received is in your Shed, not your wallet — moving it out takes one ' +
-      'more signed bundle.</span></div>'));
+      (offer.settlementTx ? '<br>Transaction <span class="addr">' + esc(offer.settlementTx) + '</span>' : '') +
+      '<br><span class="muted">The proceeds were paid to your wallet, not your Shed.</span></div>'));
     return;
   }
 
-  const go = node('<button>' + (me.role === 'maker' ? 'Sign and get the link' : 'Sign and settle') + '</button>');
-  go.disabled = !funded;
+  const go = node('<button>' + (approving
+    ? 'Approve and sign'
+    : me.role === 'maker' ? 'Sign and get the link' : 'Sign and settle') + '</button>');
+  go.disabled = !funded || wrongChain;
   go.onclick = async () => {
     go.disabled = true;
     try {
@@ -422,16 +503,37 @@ function render() {
           ', but this trade is with ' + short(account) + '. Switch the wallet to that account and try again.'
         );
       }
-      permitSig = me.permit.typedDataAvailable && me.permit.typedData
-        ? await signTyped(me.permit.typedData)
-        : await usable.request({ method: 'personal_sign', params: [me.permit.digest, account] });
-      go.textContent = 'One more signature…';
+
+      if (approving && !approved) {
+        go.textContent = 'Approve in your wallet…';
+        await usable.request({
+          method: 'eth_sendTransaction',
+          params: [{
+            from: account,
+            to: funding.approve.to,
+            data: funding.approve.data,
+            value: funding.approve.value ?? '0x0',
+          }],
+        });
+        go.textContent = 'Waiting for the approval…';
+        if (!(await waitForAllowance())) {
+          throw new Error('The approval transaction did not leave your Shed with this allowance. ' +
+            'If it was replaced, dropped, or signed by another account, try again.');
+        }
+      }
+
+      if (!approving) {
+        go.textContent = 'Check your wallet…';
+        permitSig = await signTyped(me.permit.typedData);
+        go.textContent = 'One more signature…';
+      }
       bundleSig = await signTyped(me.bundle.typedData);
       go.textContent = 'Submitting…';
       // The wallet's own account list travels with the signatures: a mismatch is almost always a
       // wallet signing with an account other than the one it reported, and the answer names it.
       const accounts = await usable.request({ method: 'eth_accounts' }).catch(() => null);
-      const body = { signature: bundleSig, permitSignature: permitSig, accounts };
+      const body = { signature: bundleSig, accounts };
+      if (!approving) body.permitSignature = permitSig;
       if (me.role === 'maker') await post('/offers/' + id + '/signature', { role: 'maker', ...body });
       else await post('/offers/' + id + '/accept', body);
       await load();
@@ -452,7 +554,7 @@ function render() {
     // that says which wallet *I* am must not be the link I hand to the other party.
     const share = location.origin + '/o/' + id;
     app.append(frag('<div class="step"><b>Send this to the other party</b>' +
-      '<div class="link"><input readonly value="' + share + '">' +
+      '<div class="link"><input readonly value="' + esc(share) + '">' +
       '<button class="ghost" style="width:auto">Copy</button></div></div>'));
     app.querySelector('.link button').onclick = (event) =>
       navigator.clipboard.writeText(share).then(() => (event.target.textContent = 'Copied'));
@@ -464,15 +566,15 @@ function render() {
 
   if (probeResults.length) {
     app.append(frag('<div class="note"><b>Typed-data probes</b>' + probeResults
-      .map((r) => '<br>' + (r.ok ? '<span class="ok">ok</span>' : '<span class="warn">failed</span>') + ' — ' + r.name)
+      .map((r) => '<br>' + (r.ok ? '<span class="ok">ok</span>' : '<span class="warn">failed</span>') + ' — ' + esc(r.name))
       .join('') + '</div>'));
   }
   app.append(diag);
 
   app.append(frag('<details><summary>Verify independently</summary>' +
-    '<p class="addr">offer ' + id + ' · order owner ' + me.bundle.typedData.domain.verifyingContract + '</p>' +
-    '<p class="addr">bundle digest ' + me.bundle.digest + '</p>' +
-    (me.permit.digest ? '<p class="addr">permit digest ' + me.permit.digest + '</p>' : '') +
+    '<p class="addr">offer ' + esc(id) + ' · order owner ' + esc(me.bundle.typedData.domain.verifyingContract) + '</p>' +
+    '<p class="addr">bundle digest ' + esc(me.bundle.digest) + '</p>' +
+    (me.permit.digest ? '<p class="addr">permit digest ' + esc(me.permit.digest) + '</p>' : '') +
     '</details>'));
 }
 
@@ -481,11 +583,13 @@ function render() {
 /// shows.
 function probeNames() {
   if (!probeCache.length) {
+    // Only the messages this side actually has to sign: an approve-funded trade has no permit to
+    // probe, and a probe over nothing reads as a wallet failure.
     probeCache = [
       ...synthetic,
       { name: '3. the permit for this trade', typedData: me.permit.typedData },
       { name: '4. the order authorisation for this trade', typedData: me.bundle.typedData },
-    ];
+    ].filter((probe) => probe.typedData);
   }
   return probeCache;
 }
@@ -562,6 +666,10 @@ ${devWalletShim(devWallet)}
 const DEFAULTS = ${JSON.stringify(defaults ?? {})};
 const el = (h) => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content; };
 const node = (h) => el(h).firstElementChild;
+// Untrusted text arrives as text: a token address or a failure message from the service is not
+// markup. Same rule as the trade page.
+const esc = (value) =>
+  String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const get = async (p) => (await fetch(p)).json();
 const post = async (p, body) => {
   const res = await fetch(p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -599,14 +707,14 @@ async function connect(wallet) {
 }
 
 function field(label, id, value, placeholder) {
-  return el('<label>' + label + '<input id="' + id + '" value="' + (value || '') + '" placeholder="' + (placeholder || '') + '"></label>');
+  return el('<label>' + esc(label) + '<input id="' + esc(id) + '" value="' + esc(value || '') + '" placeholder="' + esc(placeholder || '') + '"></label>');
 }
 
 function render() {
   const app = document.getElementById('app');
   app.replaceChildren();
 
-  if (failure) app.append(el('<div class="note warn">' + failure + '</div>'));
+  if (failure) app.append(el('<div class="note warn">' + esc(failure) + '</div>'));
 
   if (!account) {
     app.append(el('<div class="step"><b>Connect the wallet that will hold your side.</b>' +
@@ -614,7 +722,7 @@ function render() {
       'and the link binds to the counterparty you name.</p></div>'));
     const found = wallets();
     for (const wallet of found) {
-      const b = node('<button>Connect ' + wallet.name + '</button>');
+      const b = node('<button>Connect ' + esc(wallet.name) + '</button>');
       b.onclick = () => connect(wallet);
       app.append(b);
     }
@@ -622,8 +730,8 @@ function render() {
     return;
   }
 
-  app.append(el('<div class="note">Connected as <span class="addr">' + short(account) + '</span>' +
-    (walletName ? ' with ' + walletName : '') + '</div>'));
+  app.append(el('<div class="note">Connected as <span class="addr">' + esc(short(account)) + '</span>' +
+    (walletName ? ' with ' + esc(walletName) : '') + '</div>'));
 
   app.append(field('You give (token address)', 'sellToken', DEFAULTS.sellToken));
   app.append(field('amount, in the smallest unit', 'sellAmount', '100000000'));
