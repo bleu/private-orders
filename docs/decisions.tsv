@@ -1,0 +1,4 @@
+ts	phase	decision	why	evidence	result
+2026-09-14T13:00:00Z	frame	treat the pasted Shed findings and assessment as one release program	the requested end state spans contract safety, lifecycle, wallet behavior, submission policy, and proof	IMPLEMENTATION_PLAN.md	five independently verifiable stages
+2026-09-14T13:01:00Z	frame	start with replay and price isolation	two executable counterexamples disprove the core value-safety guarantee	docs/review/run-counterexamples.sh	contract stage in progress
+2026-09-14T14:10:00Z	contract	use durable state keyed by offerId	it preserves the current shared-appData bundle and directly models single-use plus future cancellation	54 local tests and 5 mainnet-fork tests pass	changed-appData replay and independent-price settlement now revert

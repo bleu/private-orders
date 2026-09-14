@@ -12,6 +12,7 @@ import {
   IPrivateTradeWrapper,
   PrivateOffer,
   PrivateTradeTerms,
+  PrivateTradeOfferState,
   PrivateTrade_OfferIdMismatch,
   PrivateTrade_BadSettlementShape,
   PrivateTrade_InteractionsNotAllowed,
@@ -30,6 +31,8 @@ import {
   PrivateTrade_ProposalExpired,
   PrivateTrade_ProposalPayloadMismatch,
   PrivateTrade_ProposalBadSignature,
+  PrivateTrade_OfferConsumed,
+  PrivateTradeOfferConsumed,
   PrivateTradeSubmitted
 } from "./interfaces/IPrivateTrade.sol";
 import {PrivateTradeLib} from "./libraries/PrivateTradeLib.sol";
@@ -60,6 +63,9 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
   /// @dev Counterparty being settled, readable by order handlers during the settlement.
   address private _activeTaker;
 
+  /// @dev A maker offer is globally single-use, independent of appData or GPv2 order UID.
+  mapping(bytes32 offerId => PrivateTradeOfferState state) private _offerStates;
+
   constructor(ICowSettlement settlement_) CowWrapper(settlement_) {}
 
   /// @inheritdoc IPrivateTradeWrapper
@@ -70,6 +76,11 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
   /// @inheritdoc IPrivateTradeWrapper
   function activeTaker() external view returns (address) {
     return _activeTaker;
+  }
+
+  /// @inheritdoc IPrivateTradeWrapper
+  function offerState(bytes32 offerId_) external view returns (PrivateTradeOfferState) {
+    return _offerStates[offerId_];
   }
 
   /// @inheritdoc ICowWrapper
@@ -105,6 +116,14 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
     ) = _decodeSettleData(settleData);
 
     _validateSettlement(tokens, clearingPrices, trades, interactions, terms);
+
+    if (_offerStates[offerId_] == PrivateTradeOfferState.Consumed) {
+      revert PrivateTrade_OfferConsumed(offerId_);
+    }
+
+    // Effects precede the settlement call. Any downstream revert rolls this transition back.
+    _offerStates[offerId_] = PrivateTradeOfferState.Consumed;
+    emit PrivateTradeOfferConsumed(offerId_, terms.taker);
 
     _activeOfferId = offerId_;
     _activeTaker = terms.taker;
@@ -264,9 +283,14 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
       if (owner != expectedOwners[i]) revert PrivateTrade_UnexpectedOwner(i, expectedOwners[i], owner);
     }
 
-    // The maker order pins both tokens, so its indices are a safe lookup into the price vector.
+    // Validate through each trade's own indices. Equal token addresses do not imply equal entries
+    // in the price vector: a settlement may contain the same token more than once.
     if (!PrivateTradeLib.isReciprocal(
-        terms, clearingPrices[trades[0].sellTokenIndex], clearingPrices[trades[0].buyTokenIndex]
+        terms,
+        clearingPrices[trades[0].sellTokenIndex],
+        clearingPrices[trades[0].buyTokenIndex],
+        clearingPrices[trades[1].sellTokenIndex],
+        clearingPrices[trades[1].buyTokenIndex]
       )) {
       revert PrivateTrade_NotReciprocal();
     }

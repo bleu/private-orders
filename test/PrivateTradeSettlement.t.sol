@@ -12,6 +12,7 @@ import {
   PrivateOffer,
   PrivateTradeTerms,
   PrivateTradeRole,
+  PrivateTradeOfferState,
   PrivateTrade_NoActiveTrade,
   PrivateTrade_WrongActiveOffer,
   PrivateTrade_BadSettlementShape,
@@ -23,7 +24,8 @@ import {
   PrivateTrade_NotLastWrapper,
   PrivateTrade_BadTaker,
   PrivateTrade_OfferIdMismatch,
-  PrivateTrade_InvalidSettleData
+  PrivateTrade_InvalidSettleData,
+  PrivateTrade_OfferConsumed
 } from "../src/interfaces/IPrivateTrade.sol";
 import {PrivateTradeLib} from "../src/libraries/PrivateTradeLib.sol";
 import {PrivateTradeBuilder} from "../src/libraries/PrivateTradeBuilder.sol";
@@ -193,8 +195,50 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
     _settle(terms, makerParams, takerParams);
 
     vm.prank(solver);
-    vm.expectRevert(bytes("GPv2: order filled"));
+    vm.expectRevert(abi.encodeWithSelector(PrivateTrade_OfferConsumed.selector, PrivateTradeLib.offerId(terms.offer)));
     wrapper.wrappedSettle(_settleData(terms, makerParams, takerParams), _chainedWrapperData(terms));
+  }
+
+  /// @dev A conditional authorization represents one bilateral trade, even when a submitter changes
+  /// appData so GPv2 derives a different order UID and both parties later replenish their funds.
+  function test_sameOfferCannotSettleAgainWithDifferentAppData() public {
+    (
+      PrivateTradeTerms memory terms,
+      IConditionalOrder.ConditionalOrderParams memory makerParams,
+      IConditionalOrder.ConditionalOrderParams memory takerParams
+    ) = _readyTrade();
+
+    _settle(terms, makerParams, takerParams);
+    _fundAndApprove(terms);
+
+    bytes32 otherAppData = keccak256("different-private-trade-document");
+    GPv2Trade.Data[] memory trades = _tradesWithAppData(terms, makerParams, takerParams, otherAppData);
+
+    vm.prank(solver);
+    vm.expectRevert(abi.encodeWithSelector(PrivateTrade_OfferConsumed.selector, PrivateTradeLib.offerId(terms.offer)));
+    wrapper.wrappedSettle(
+      _settleDataWith(_tokens(), _clearingPrices(), trades, _emptyInteractions()), _chainedWrapperData(terms)
+    );
+  }
+
+  function test_failedSettlementDoesNotConsumeOffer() public {
+    (
+      PrivateTradeTerms memory terms,
+      IConditionalOrder.ConditionalOrderParams memory makerParams,
+      IConditionalOrder.ConditionalOrderParams memory takerParams
+    ) = _readyTrade();
+    bytes32 offerId = PrivateTradeLib.offerId(terms.offer);
+
+    _approveRelayer(alice, usdc, 0);
+
+    vm.prank(solver);
+    vm.expectRevert();
+    wrapper.wrappedSettle(_settleData(terms, makerParams, takerParams), _chainedWrapperData(terms));
+    assertEq(uint256(wrapper.offerState(offerId)), uint256(PrivateTradeOfferState.Available));
+
+    _approveRelayer(alice, usdc, USDC_AMOUNT);
+    _settle(terms, makerParams, takerParams);
+    assertEq(uint256(wrapper.offerState(offerId)), uint256(PrivateTradeOfferState.Consumed));
   }
 
   // --- bundle-specific rules
@@ -265,6 +309,37 @@ contract PrivateTradeSettlementTest is PrivateTradeTestBase {
       _settleDataWith(_tokens(), prices, _trades(terms, makerParams, takerParams), _emptyInteractions()),
       _chainedWrapperData(terms)
     );
+  }
+
+  /// @dev The driver can repeat token addresses at different indices. Both trades must be checked
+  /// through their own indices so neither can draw an improved output from a settlement buffer.
+  function test_rejectsIndependentTakerPrices() public {
+    (
+      PrivateTradeTerms memory terms,
+      IConditionalOrder.ConditionalOrderParams memory makerParams,
+      IConditionalOrder.ConditionalOrderParams memory takerParams
+    ) = _readyTrade();
+
+    IERC20[] memory tokens = new IERC20[](4);
+    tokens[0] = IERC20(address(usdc));
+    tokens[1] = IERC20(address(wbtc));
+    tokens[2] = IERC20(address(wbtc));
+    tokens[3] = IERC20(address(usdc));
+
+    uint256[] memory prices = new uint256[](4);
+    prices[0] = WBTC_AMOUNT;
+    prices[1] = USDC_AMOUNT;
+    prices[2] = 2 * USDC_AMOUNT;
+    prices[3] = WBTC_AMOUNT;
+
+    GPv2Trade.Data[] memory trades = _trades(terms, makerParams, takerParams);
+    trades[1].sellTokenIndex = 2;
+    trades[1].buyTokenIndex = 3;
+    usdc.mint(address(settlement), USDC_AMOUNT);
+
+    vm.prank(solver);
+    vm.expectRevert(PrivateTrade_NotReciprocal.selector);
+    wrapper.wrappedSettle(_settleDataWith(tokens, prices, trades, _emptyInteractions()), _chainedWrapperData(terms));
   }
 
   function test_rejectsDuplicateMakerOrder() public {

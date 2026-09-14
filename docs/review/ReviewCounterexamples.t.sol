@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity >=0.8.0 <0.9.0;
 import {PrivateTradeTestBase} from "./utils/PrivateTradeTestBase.sol";
-import {PrivateTradeTerms} from "../src/interfaces/IPrivateTrade.sol";
+import {
+  PrivateTradeTerms,
+  PrivateTrade_OfferConsumed,
+  PrivateTrade_NotReciprocal
+} from "../src/interfaces/IPrivateTrade.sol";
+import {PrivateTradeLib} from "../src/libraries/PrivateTradeLib.sol";
 import {IConditionalOrder} from "composable-cow/interfaces/IConditionalOrder.sol";
 import {IERC20} from "cowprotocol/contracts/interfaces/IERC20.sol";
 import {GPv2Trade} from "cowprotocol/contracts/libraries/GPv2Trade.sol";
 
 contract ReviewCounterexamples is PrivateTradeTestBase {
-  function test_sameAuthorizationSettlesAgainWithDifferentAppData() public {
+  function test_sameAuthorizationCannotSettleAgainWithDifferentAppData() public {
     (
       PrivateTradeTerms memory terms,
       IConditionalOrder.ConditionalOrderParams memory maker,
@@ -17,14 +22,13 @@ contract ReviewCounterexamples is PrivateTradeTestBase {
     _fundAndApprove(terms);
     GPv2Trade.Data[] memory trades = _tradesWithAppData(terms, maker, taker, keccak256("different-document"));
     vm.prank(solver);
+    vm.expectRevert(abi.encodeWithSelector(PrivateTrade_OfferConsumed.selector, PrivateTradeLib.offerId(terms.offer)));
     wrapper.wrappedSettle(
       _settleDataWith(_tokens(), _clearingPrices(), trades, _emptyInteractions()), _chainedWrapperData(terms)
     );
-    assertEq(usdc.balanceOf(bobOwner), 2 * USDC_AMOUNT);
-    assertEq(wbtc.balanceOf(aliceOwner), 2 * WBTC_AMOUNT);
   }
 
-  function test_takerIndependentPricesSpendSettlementBuffer() public {
+  function test_takerIndependentPricesCannotSpendSettlementBuffer() public {
     (
       PrivateTradeTerms memory terms,
       IConditionalOrder.ConditionalOrderParams memory maker,
@@ -45,8 +49,8 @@ contract ReviewCounterexamples is PrivateTradeTestBase {
     trades[1].buyTokenIndex = 3;
     usdc.mint(address(settlement), USDC_AMOUNT);
     vm.prank(solver);
+    vm.expectRevert(PrivateTrade_NotReciprocal.selector);
     wrapper.wrappedSettle(_settleDataWith(tokens, prices, trades, _emptyInteractions()), _chainedWrapperData(terms));
-    assertEq(usdc.balanceOf(bobOwner), 2 * USDC_AMOUNT);
-    assertEq(usdc.balanceOf(address(settlement)), 0);
+    assertEq(usdc.balanceOf(address(settlement)), USDC_AMOUNT);
   }
 }

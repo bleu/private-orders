@@ -27,6 +27,7 @@ import {
   PrivateTradeTerms,
   PrivateTradeRole,
   PrivateTrade_NoActiveTrade,
+  PrivateTrade_OfferConsumed,
   PrivateTrade_ProposalPayloadMismatch
 } from "../../src/interfaces/IPrivateTrade.sol";
 
@@ -251,7 +252,9 @@ abstract contract PrivateTradeE2EBase is Test {
     submitter.relayBundles(_submitterContext(), signed.maker, signed.taker);
 
     // The pair cannot settle twice.
-    vm.expectRevert(bytes("GPv2: order filled"));
+    vm.expectRevert(
+      abi.encodeWithSelector(PrivateTrade_OfferConsumed.selector, PrivateTradeLib.offerId(signed.terms.offer))
+    );
     submitter.submitPrepared(_submitterContext(), signed.terms);
 
     assertEq(IERC20(DAI).balanceOf(aliceEoa), DAI_AMOUNT, "alice's wallet did not receive DAI");

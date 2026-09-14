@@ -11,6 +11,13 @@ enum PrivateTradeRole {
   Taker
 }
 
+/// @dev Durable lifecycle enforced by the settlement wrapper.
+enum PrivateTradeOfferState {
+  Available,
+  Consumed,
+  Cancelled
+}
+
 /// @dev The terms one party commits to when creating a private offer.
 /// @param maker The contract account that owns the maker order (CoW Shed, Safe, custom wallet).
 /// @param allowedTaker Address permitted to accept, or `address(0)` for anyone holding the link.
@@ -130,6 +137,12 @@ event PrivateTradeSubmitted(address indexed subSolver, bytes32 indexed offerId);
 /// @dev Raised when the two orders do not commit to the same appData document.
 error PrivateTrade_AppDataMismatch(bytes32 makerAppData, bytes32 takerAppData);
 
+/// @dev Raised when a successful settlement already consumed this offer.
+error PrivateTrade_OfferConsumed(bytes32 offerId);
+
+/// @notice Emitted when an offer is consumed by a successful atomic settlement.
+event PrivateTradeOfferConsumed(bytes32 indexed offerId, address indexed taker);
+
 /// @notice View of the settlement context a conditional order validates against.
 interface IPrivateTradeWrapper {
   /// @notice Offer currently being settled, or `bytes32(0)` outside a private trade settlement.
@@ -137,4 +150,7 @@ interface IPrivateTradeWrapper {
 
   /// @notice Counterparty currently being settled, or `address(0)` outside a private trade settlement.
   function activeTaker() external view returns (address);
+
+  /// @notice Durable lifecycle state for an offer.
+  function offerState(bytes32 offerId) external view returns (PrivateTradeOfferState);
 }

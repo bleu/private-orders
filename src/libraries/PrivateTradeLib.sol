@@ -91,13 +91,23 @@ library PrivateTradeLib {
     pure
     returns (bool)
   {
+    return isReciprocal(terms, makerSellPrice, makerBuyPrice, makerBuyPrice, makerSellPrice);
+  }
+
+  /// @notice Exact reciprocity using each trade's own clearing-price indices.
+  function isReciprocal(
+    PrivateTradeTerms memory terms,
+    uint256 makerSellPrice,
+    uint256 makerBuyPrice,
+    uint256 takerSellPrice,
+    uint256 takerBuyPrice
+  ) internal pure returns (bool) {
     if (makerSellPrice == 0 || makerBuyPrice == 0) return false;
+    if (takerSellPrice == 0 || takerBuyPrice == 0) return false;
 
     uint256 makerSellAmount = terms.offer.sellAmount;
     uint256 makerBuyAmount = terms.offer.buyAmount;
 
-    uint256 takerSellPrice = makerBuyPrice;
-    uint256 takerBuyPrice = makerSellPrice;
     uint256 takerSellAmount = makerBuyAmount;
     uint256 takerBuyAmount = makerSellAmount;
 

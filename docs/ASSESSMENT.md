@@ -4,11 +4,11 @@ Reviewed on 2026-09-14 against `e0069ce17f0bd4d9149309bccde6da592597d9ca`.
 
 ## Verdict
 
-Continue the project as a focused ERC20 bilateral settlement product. Do not release this implementation with real funds yet. The app demonstrates an important flow, but two reproduced contract defects invalidate its claims of exact, single-use settlement. The service also has reproducible cross-offer payload confusion and false settlement reporting.
+Continue the project as a focused ERC20 bilateral settlement product. Do not release this implementation with real funds yet. The two reproduced contract defects are now covered by passing regression tests: offers are single-use across appData hashes, and each leg is checked against its own clearing prices. The service still has reproducible cross-offer payload confusion and false settlement reporting.
 
 The strongest product is a link that lets two known parties execute an agreed swap, inspect readable terms, cancel before execution, and recover cleanly from failure. CoW integration can provide distribution and familiar infrastructure. It does not automatically provide privacy, a business model, or permission to bypass auction rules.
 
-This is a concept, implementation, and release review, not an external security audit. Application code remains unchanged. The accompanying counterexamples are executable review artifacts, not fixes.
+This is a concept, implementation, and release review, not an external security audit. The accompanying contract artifacts now assert the fixes; the service artifacts continue to reproduce unresolved defects.
 
 ## Recovered intent and resume point
 
@@ -66,7 +66,7 @@ The orderbook, autopilot, driver, and custom solver participate in the implement
 | Component | Responsibility | Assessment |
 | --- | --- | --- |
 | `PrivateTradeLib`, `PrivateTradeBuilder` | Derive orders, conditional authorizations, signatures and settlement encoding | Useful shared implementation, but appData is not fixed by the conditional authorization |
-| `PrivateTradeWrapper`, `PrivateTradeOrder` | Enforce paired execution using temporary wrapper context | Sound general mechanism; replay and independent-price defects require remediation |
+| `PrivateTradeWrapper`, `PrivateTradeOrder` | Enforce paired execution using temporary wrapper context and durable offer state | Replay and independent-price defects remediated locally; cancellation remains unfinished |
 | CoW Shed, `PrivateTradeAuthoriser` | Owner-signed funding and authorization; enforce own-wallet beneficiary | Valuable protection on the generated bundle path; not a substitute for validating what arbitrary signed calls do |
 | `LinkCompute`, `LinkRelay`, link service | Persist offers, compute signatures, relay and report progress | Functional demo architecture; shared scratch files and lifecycle assumptions are unsafe for multiple offers |
 | Custom sub-solver and browser app | Produce JIT/fulfillment solutions and collect signatures | Demonstrated locally in prior session; not a completed production BYOS integration |
@@ -75,25 +75,25 @@ The orderbook, autopilot, driver, and custom solver participate in the implement
 
 ### 1. Conditional authorization can execute again under a different appData hash
 
-**Reproduced.** `PrivateTradeOrder._orderFor` accepts the current order's appData when deriving the expected order, so it never fixes appData to an authorized value. The wrapper only checks that both orders agree with each other. GPv2 includes appData in the order digest and tracks fills per order UID.
+**Remediated locally.** `PrivateTradeOrder._orderFor` still derives the expected order from the current appData, but the wrapper now records successful execution by `offerId`, independently of appData and GPv2 order UID. The consumed transition occurs before the settlement call and rolls back if settlement fails.
 
 The counterexample settles a pair, replenishes its balances and allowances, changes both orders' appData, and settles again with the same conditional authorizations. Both recipients receive twice the authorized trade amount across the two executions. It does not require another conditional-order authorization.
 
 Preconditions matter: the repeated transfer requires available funds and allowance. The exact initial funding can temporarily prevent it, but subsequent trades can replenish both. The existing `test_replayReverts` only retries the identical order bytes.
 
-Sources: `src/PrivateTradeOrder.sol:144`, `src/PrivateTradeWrapper.sol:236`, `src/libraries/PrivateTradeBuilder.sol:76`, and `lib/cow-contracts/src/contracts/GPv2Settlement.sol:393`. Proof: `docs/review/ReviewCounterexamples.t.sol`, `test_sameAuthorizationSettlesAgainWithDifferentAppData`.
+Sources: `src/PrivateTradeWrapper.sol`, `src/PrivateTradeOrder.sol`, and `lib/cow-contracts/src/contracts/GPv2Settlement.sol`. Proof: `test/PrivateTradeSettlement.t.sol`, including changed-appData replay and failed-settlement rollback; `docs/review/ReviewCounterexamples.t.sol`.
 
 Required outcome: one authorized offer cannot execute twice, even if appData changes, balances return, approvals are renewed, or another submitter encodes it. Consider explicit consumed-offer state and cancellation semantics, or a rigorously fixed order commitment. Do not rely on depleted allowances as replay protection.
 
 ### 2. Taker prices can consume existing settlement funds
 
-**Reproduced.** The driver-compatible token list permits duplicate token addresses at different indices. `_validateSettlement` checks reciprocity using only the maker's indices. GPv2 computes each trade with that trade's own indices.
+**Remediated locally.** The driver-compatible token list still permits duplicate token addresses at different indices. `_validateSettlement` now checks the maker and taker independently using each trade's own indices, matching GPv2's execution equation.
 
 The counterexample keeps maker execution exact, gives the taker separate token indices and a better price, seeds the settlement with 100 USDC, and completes successfully. The taker receives 200 USDC for an agreement specifying 100 USDC; the settlement's seeded 100 USDC is consumed.
 
 This requires an authenticated submitting path and an existing settlement balance. It does not show that an arbitrary unauthenticated EOA can invoke the wrapper directly. It does refute the wrapper's exactness and buffer-isolation claims.
 
-Sources: `src/PrivateTradeWrapper.sol:268`, `lib/cow-contracts/src/contracts/GPv2Settlement.sol:311`. Proof: `test_takerIndependentPricesSpendSettlementBuffer`.
+Sources: `src/PrivateTradeWrapper.sol`, `src/libraries/PrivateTradeLib.sol`, and `lib/cow-contracts/src/contracts/GPv2Settlement.sol`. Proof: `test_rejectsIndependentTakerPrices` and `test_takerIndependentPricesCannotSpendSettlementBuffer`.
 
 Required outcome: validate actual executed output for each trade using its own prices, and prove that the pair cannot consume pre-existing protocol balances. Retain duplicate-index compatibility with the driver.
 
@@ -169,9 +169,9 @@ My recommendation is to keep the useful contract structure, fix the invalid guar
 | `FORK_RPC=https://ethereum-rpc.publicnode.com forge test --match-path 'test/fork/*' -vv` | 5 passed | Local fork with funded accounts and impersonated allowlisting; no production writes |
 | `forge fmt --check` | Passed | Formatting only |
 | `node scripts/check-page.mjs` | Both generated page scripts parse | No browser-wallet compatibility proof |
-| `bash docs/review/run-counterexamples.sh` | Two contract counterexamples and two service counterexamples reproduced | Contract tests execute actual local GPv2 code. Service checks mock external boundaries and execute extracted existing functions. |
+| `bash docs/review/run-counterexamples.sh` | Two contract regressions pass; two service counterexamples remain reproduced | Contract tests execute actual local GPv2 code. Service checks mock external boundaries and execute extracted existing functions. |
 
-A passing counterexample means the defect is present. After remediation these demonstrations should stop passing; the normal regression suite should assert the corrected behavior instead. Run them with `bash docs/review/run-counterexamples.sh`. The runner copies source/tests into a temporary directory and does not broadcast transactions.
+The contract review cases now pass only when the exploit attempts revert and protocol balances remain isolated. The service cases still print `REPRODUCED` while those defects remain. Run them with `bash docs/review/run-counterexamples.sh`. The runner copies source/tests into a temporary directory and does not broadcast transactions.
 
 The isolated counterexample build also reports two existing unused-parameter warnings in `PrivateTradeBuilder.wrapperData`. The service check initially needed missing mock globals supplied; its final checked-in version runs successfully. These were test-fixture errors, not application failures.
 
@@ -181,7 +181,7 @@ The Prove It Works principle changed the review method: passing tests were follo
 
 ## Continuation and acceptance gates
 
-1. Fix replay and per-trade price validation first. Convert the counterexamples into regression tests that require rejection, add replenished-Shed and duplicate-index cases, then re-run the contract/fork suites. Scope cancellation state alongside single-use state.
+1. Complete cancellation around the new offer lifecycle state, then make service plans immutable per offer and replace balance-only settlement inference with order and receipt evidence.
 2. Make signed payloads immutable per offer and implement durable lifecycle/recovery. Test two interleaved offers, consumed permit retries, post-order timeouts, concurrent acceptance, restart, cancellation and expiry. Settlement must require exact order/transaction evidence.
 3. Agree the production submission contract with CoW/BYOS. Document privacy, operator identity, fee payer, signature admission, scoring, attribution, supported infrastructure flags and staging allowlisting. Demonstrate one pair on that actual path before claiming BYOS support.
 4. Finish a restricted ERC20 desktop beta. Use named standard tokens, readable decimal inputs, safe metadata rendering, real wallet signing, a working approval fallback, cancellation and recovery. Prove exact wallet debits/credits and no residual unexpected funds. Open acceptance requires its own proof before enabling it.
