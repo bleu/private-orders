@@ -5,6 +5,18 @@ it is asked to sign without a UI in between. A wallet extension is where this pr
 wrong twice: a typed-data payload sent as an object instead of a JSON string (Rabby rejects it), and a
 wallet signing with the *selected* account rather than the connected one.
 
+**Run once, by hand, with Rabby — and it worked.** On 2026-09-14, against the offline stack, the whole
+flow settled as tx `0x31d6c0663a9991f5d60b3df7efab4d442e0bead852f25d5f28f7dd441bd4231c`:
+
+- receipt status `0x1`, submitted by the relayer `0xf39Fd6e5…`, not by either party
+- wrapper `consumed`, order `fulfilled`, receipt succeeded — the page's `settled` was the chain's answer
+- neither party's nonce moved: no transaction anywhere in the flow
+- both prompts rendered as readable EIP-712: a **COWShed** domain and an **ExecuteHooks** message, no
+  hex blob, and no prompt mentioned gas
+
+The steps below are the ones that were followed. The one that took a decision was the wallet setup:
+chain id 1 must come from *overriding Ethereum's RPC*, not from adding a network.
+
 ## 1. Start the stack
 
 ```bash

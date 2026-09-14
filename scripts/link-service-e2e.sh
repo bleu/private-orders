@@ -42,13 +42,19 @@ snapshot() {
     "$(cast call "${USDC_ADDRESS}" "balanceOf(address)(uint256)" "${TAKER}" --rpc-url "${RPC}" | awk '{print $1}')"
 }
 
-# What the Sheds hold. After a settlement both are empty on the received side, which is the whole
-# point of paying the wallets: nothing is stranded in a contract.
+# What the Sheds hold. After a settlement all four are unchanged: the sell side was funded and spent
+# inside the signed bundle, and the buy side is paid to the wallet. Nothing is stranded.
 shed_balances() {
-  printf '%s %s\n' \
+  printf '%s %s %s %s\n' \
+    "$(cast call "${USDC_ADDRESS}" "balanceOf(address)(uint256)" "${MAKER_SHED}" --rpc-url "${RPC}" | awk '{print $1}')" \
     "$(cast call "${DAI_ADDRESS}" "balanceOf(address)(uint256)" "${MAKER_SHED}" --rpc-url "${RPC}" | awk '{print $1}')" \
+    "$(cast call "${DAI_ADDRESS}" "balanceOf(address)(uint256)" "${TAKER_SHED}" --rpc-url "${RPC}" | awk '{print $1}')" \
     "$(cast call "${USDC_ADDRESS}" "balanceOf(address)(uint256)" "${TAKER_SHED}" --rpc-url "${RPC}" | awk '{print $1}')"
 }
+
+# Balances are too large for the shell's 64-bit arithmetic.
+minus() { python3 -c "print(int('$1') - int('$2'))"; }
+plus() { python3 -c "print(int('$1') + int('$2'))"; }
 
 log() { printf '\n==> %s\n' "$*"; }
 
@@ -109,14 +115,17 @@ curl -fsS "${SERVICE}/health" >/dev/null
 
 # --- 3. the maker creates an offer ---------------------------------------------------------------
 
+SELL_AMOUNT=100000000                      # 100 USDC, 6 decimals
+BUY_AMOUNT=100000000000000000000           # 100 DAI, 18 decimals
+
 log "maker creates the offer"
 OFFER=$(curl -fsS -X POST "${SERVICE}/offers" -H 'content-type: application/json' -d "{
   \"maker\": \"$(cast wallet address --private-key ${MAKER_KEY})\",
   \"taker\": \"$(cast wallet address --private-key ${TAKER_KEY})\",
   \"sellToken\": \"${USDC_ADDRESS}\",
-  \"sellAmount\": \"100000000\",
+  \"sellAmount\": \"${SELL_AMOUNT}\",
   \"buyToken\": \"${DAI_ADDRESS}\",
-  \"buyAmount\": \"100000000000000000000\",
+  \"buyAmount\": \"${BUY_AMOUNT}\",
   \"validFor\": 86400
 }")
 OFFER_ID=$(echo "${OFFER}" | jqq "d['id']")
@@ -187,7 +196,7 @@ TAKER_PERMIT=$(echo "${VIEW}" | jqq "d['funding']['digest']")
 
 read -r M0 MD0 T0 TU0 <<< "$(snapshot)"
 # The Sheds hold whatever earlier runs left; what matters is that a settlement adds nothing to them.
-read -r SHED_DAI0 SHED_USDC0 <<< "$(shed_balances)"
+read -r SHED_MU0 SHED_MD0 SHED_TD0 SHED_TU0 <<< "$(shed_balances)"
 
 log "taker accepts"
 signs_alike "$(echo "${VIEW}" | jqq "json.dumps(d['bundle']['typedData'])")" "${TAKER_DIGEST}" "${TAKER_KEY}" "taker's bundle"
@@ -234,13 +243,27 @@ echo "   maker wallet DAI  ${MD0} -> ${MD1}   (received)"
 echo "   taker wallet DAI  ${T0} -> ${T1}   (sold)"
 echo "   taker wallet USDC ${TU0} -> ${TU1}   (received)"
 
-# The proceeds went to the people, not to the contracts that hold the orders: neither Shed gained.
-read -r SHED_DAI1 SHED_USDC1 <<< "$(shed_balances)"
-[ "${SHED_DAI1}" = "${SHED_DAI0}" ] || { echo "FAILED: the maker's Shed gained ${SHED_DAI1} DAI" >&2; exit 1; }
-[ "${SHED_USDC1}" = "${SHED_USDC0}" ] || { echo "FAILED: the taker's Shed gained ${SHED_USDC1} USDC" >&2; exit 1; }
-echo "   neither Shed gained anything"
-[ "${MD1}" != "${MD0}" ] || { echo "FAILED: the maker wallet did not receive DAI" >&2; exit 1; }
-[ "${TU1}" != "${TU0}" ] || { echo "FAILED: the taker wallet did not receive USDC" >&2; exit 1; }
+read -r SHED_MU1 SHED_MD1 SHED_TD1 SHED_TU1 <<< "$(shed_balances)"
+
+# Every balance, to the unit. "It moved" is not the claim; "it moved by exactly the agreed amounts, and
+# nothing else moved" is.
+[ "${M1}" = "$(minus "${M0}" "${SELL_AMOUNT}")" ] \
+  || { echo "FAILED: the maker's USDC went ${M0} -> ${M1}, expected -${SELL_AMOUNT}" >&2; exit 1; }
+[ "${MD1}" = "$(plus "${MD0}" "${BUY_AMOUNT}")" ] \
+  || { echo "FAILED: the maker's DAI went ${MD0} -> ${MD1}, expected +${BUY_AMOUNT}" >&2; exit 1; }
+[ "${T1}" = "$(minus "${T0}" "${BUY_AMOUNT}")" ] \
+  || { echo "FAILED: the taker's DAI went ${T0} -> ${T1}, expected -${BUY_AMOUNT}" >&2; exit 1; }
+[ "${TU1}" = "$(plus "${TU0}" "${SELL_AMOUNT}")" ] \
+  || { echo "FAILED: the taker's USDC went ${TU0} -> ${TU1}, expected +${SELL_AMOUNT}" >&2; exit 1; }
+echo "   each wallet moved by exactly the agreed amount, and nothing else"
+
+# Nothing is stranded: the sell side was funded and spent inside the signed bundle, and the buy side
+# was paid to the wallet rather than to the contract that owns the order.
+[ "${SHED_MU1}" = "${SHED_MU0}" ] || { echo "FAILED: the maker's Shed kept ${SHED_MU1} USDC" >&2; exit 1; }
+[ "${SHED_MD1}" = "${SHED_MD0}" ] || { echo "FAILED: the maker's Shed gained ${SHED_MD1} DAI" >&2; exit 1; }
+[ "${SHED_TD1}" = "${SHED_TD0}" ] || { echo "FAILED: the taker's Shed kept ${SHED_TD1} DAI" >&2; exit 1; }
+[ "${SHED_TU1}" = "${SHED_TU0}" ] || { echo "FAILED: the taker's Shed gained ${SHED_TU1} USDC" >&2; exit 1; }
+echo "   no Shed gained, kept, or stranded anything"
 
 # --- 6. cancellation -------------------------------------------------------------------------
 

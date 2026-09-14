@@ -120,6 +120,8 @@ async function launchChrome() {
       '--disable-gpu',
       '--disable-dev-shm-usage',
       '--allow-insecure-localhost',
+      // Containers that run as root need this; local machines do not, and it is not the default.
+      ...(process.env.CHROME_NO_SANDBOX === '1' ? ['--no-sandbox'] : []),
       'about:blank',
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] },

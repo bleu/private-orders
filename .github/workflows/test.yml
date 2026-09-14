@@ -33,3 +33,41 @@ jobs:
 
       - name: Run Forge tests
         run: forge test -vvv
+
+      # The regressions that `forge test` cannot see: the service's lifecycle over real HTTP, and the
+      # page in a real browser. Both run against fixtures that replace `forge`, `cast` and the
+      # orderbook at their boundaries, so neither needs a chain.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run the regression gates
+        run: bash docs/review/run-counterexamples.sh
+        env:
+          # The runner's Chrome runs as root in this container image.
+          CHROME_NO_SANDBOX: '1'
+
+  fork:
+    name: Mainnet fork
+    # Manual, because it depends on a public RPC and a funded-account fork. It is the cheapest real
+    # chain check there is: real GPv2Settlement, real ComposableCoW, real COWShedFactory, with the
+    # wrapper allowlisted by impersonating the manager. The offline stack (docs/OFFLINE.md) is the
+    # fuller check and needs its own repository's Docker images, so it stays a local run.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Run the fork tests
+        run: forge test --match-path 'test/fork/*' -vv
+        env:
+          FORK_RPC: https://ethereum-rpc.publicnode.com
