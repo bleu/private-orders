@@ -28,4 +28,6 @@ node "$ROOT/docs/review/service-counterexamples.mjs"
 node "$ROOT/docs/review/service-lifecycle.mjs"
 # Two requests in flight at once, which `fetch` cannot produce.
 node "$ROOT/docs/review/service-concurrency.mjs"
+# Refusals whose value is the sentence, not the status.
+node "$ROOT/docs/review/service-guards.mjs"
 node "$ROOT/docs/review/page-safety.mjs"

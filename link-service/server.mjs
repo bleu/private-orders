@@ -963,6 +963,20 @@ function runChecksBeforeSigning(offer, role) {
   return { ok: problems.length === 0, role, checks, problems, account };
 }
 
+/// Whether the maker can still cancel, which is the offer's own window and not a new one.
+///
+/// The cancellation plan is built when the offer is created, with the same deadline as the offer. Once
+/// that passes, the plan is a bundle the Shed will refuse — so the honest answer is not a plan but a
+/// sentence, and the sentence has to say where the tokens are, because by then the order is dead and
+/// the only thing left worth doing is moving them out of the Shed.
+function cancellationClosed(cancellation) {
+  return Number(cancellation?.deadline ?? 0) <= Math.floor(Date.now() / 1000);
+}
+
+const CLOSED_SENTENCE =
+  'the cancellation window for this offer has closed, so the order it would cancel cannot fill either. '
+  + 'Anything this side funded is still in its Shed and can be moved to its wallet.';
+
 /// The terms, with amounts already scaled. No addresses: this view answers to whoever holds the link.
 const publicTerms = (offer) => {
   const computed = offer.computed;
@@ -1220,6 +1234,9 @@ const server = http.createServer(async (req, res) => {
         if (addressRole(offer, who) !== 'maker') {
           return json(res, 403, { error: 'only the maker can cancel this offer' });
         }
+        if (cancellationClosed(offer.computed.makerCancellation)) {
+          return json(res, 409, { error: CLOSED_SENTENCE });
+        }
         const cancellation = offer.computed.makerCancellation;
         return json(res, 200, {
           offerId: offer.computed.offerId,
@@ -1235,6 +1252,9 @@ const server = http.createServer(async (req, res) => {
           return json(res, 403, { error: 'only the maker can cancel this offer' });
         }
         const cancellation = offer.computed.makerCancellation;
+        if (cancellationClosed(cancellation)) {
+          return json(res, 409, { error: CLOSED_SENTENCE });
+        }
         if (verifies({ typedData: cancellation.bundleTypedData, digest: cancellation.digest, signature: body.signature, owner: cancellation.owner }) !== true) {
           return json(res, 400, { error: 'signature does not match this cancellation plan' });
         }
