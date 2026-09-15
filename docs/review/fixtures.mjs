@@ -151,6 +151,30 @@ if (script.endsWith('LinkRelay.s.sol')) {
   if (broadcasting) {
     const file = root + '/broadcasts';
     fs.writeFileSync(file, String(Number(fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '0') + 1));
+
+    // The relay really does move money, so the fake has to as well. Without this every test about a
+    // funded offer is vacuous: the owner's wallet still holds the sell tokens it just spent, the Shed
+    // looks empty, and a retry passes a check the chain would refuse.
+    const computed = JSON.parse(fs.readFileSync(process.env.LINK_COMPUTED_FILE, 'utf8'));
+    const state = JSON.parse(fs.readFileSync(root + '/chain.json', 'utf8'));
+    state.tokens ??= {};
+    state.nonces ??= {};
+    state.contracts ??= [];
+    for (const key of ['makerBundle', 'takerBundle']) {
+      const side = computed[key];
+      if (!side) continue;
+      const token = String(side.sellToken).toLowerCase();
+      const amount = BigInt(side.sellAmount);
+      const tokenState = (state.tokens[token] ??= { symbol: 'TOKEN', decimals: 18, balances: {} });
+      tokenState.balances ??= {};
+      const from = String(side.owner).toLowerCase();
+      const to = String(side.shed).toLowerCase();
+      tokenState.balances[from] = String(BigInt(tokenState.balances[from] ?? '0') - amount);
+      tokenState.balances[to] = String(BigInt(tokenState.balances[to] ?? '0') + amount);
+      state.nonces[side.nonce] = true;
+      if (!state.contracts.includes(to)) state.contracts.push(to);
+    }
+    fs.writeFileSync(root + '/chain.json', JSON.stringify(state));
   }
   process.stdout.write('bundles relayed\\n');
   process.exit(0);
@@ -258,6 +282,9 @@ if (args[0] === 'send') {
 }
 
 if (args[0] === 'code') {
+  // A switch for "the chain could not be read", so a test can show that one failed read is not
+  // remembered as a fact about the account.
+  if (fs.existsSync(root + '/code-fault')) fail('the chain could not be read');
   const state = chain();
   const address = String(args[1]).toLowerCase();
   process.stdout.write((state.contracts ?? []).includes(address) ? '0x60806040' : '0x');
@@ -303,6 +330,10 @@ if (args[0] === 'call') {
   }
   if (signature.startsWith('offerState')) {
     process.stdout.write(String(state.offerState?.[args[3]] ?? 0) + '\\n');
+    process.exit(0);
+  }
+  if (signature.startsWith('nonces')) {
+    process.stdout.write(String(state.nonces?.[args[3]] === true ? 'true' : 'false'));
     process.exit(0);
   }
   if (signature.startsWith('symbol')) {

@@ -146,16 +146,18 @@ const codeCache = new Map();
 function hasCode(address) {
   const key = String(address ?? '').toLowerCase();
   if (!key) return false;
-  if (!codeCache.has(key)) {
-    try {
-      codeCache.set(key, cast(['code', address, '--rpc-url', RPC]).trim() !== '0x');
-    } catch {
-      // An unreadable chain must not silently turn a contract owner into an EOA: assume code, which
-      // routes to the path that asks the owner rather than the one that guesses.
-      codeCache.set(key, true);
-    }
+  if (codeCache.has(key)) return codeCache.get(key);
+  try {
+    const value = cast(['code', address, '--rpc-url', RPC]).trim() !== '0x';
+    codeCache.set(key, value);
+    return value;
+  } catch {
+    // A failed read is not a fact about the account, so it is not remembered. This call answers
+    // conservatively — an owner with code is asked over ERC-1271 rather than recovered, which is the
+    // safer route — but the next call asks the chain again. Remembering the failure would let one
+    // unreachable RPC moment route an EOA down the contract path until the process restarted.
+    return true;
   }
-  return codeCache.get(key);
 }
 
 /// Ask the Solidity builder to derive the whole payload. No private key, no transaction.
@@ -351,7 +353,7 @@ function withdrawPlan(offer, role) {
 /// and not a digest it never saw.
 function verifies({ typedData, digest, signature, owner }) {
   const sig = signature ?? '';
-  if (!/^0x([0-9a-fA-F]{2})*$/.test(sig) || sig.length < 132) return null;
+  if (!/^0x([0-9a-fA-F]{2})*$/.test(sig) || sig === '0x') return null;
 
   if (hasCode(owner)) {
     if (!digest) return null;
@@ -384,10 +386,14 @@ function verifies({ typedData, digest, signature, owner }) {
 /// signatures concatenated in ascending address order, a nested scheme possibly more.
 function signatureProblem(owner, signature) {
   const sig = signature ?? '';
-  if (!/^0x([0-9a-fA-F]{2})*$/.test(sig) || sig.length < 132) {
-    return 'signature must be at least r || s || v, as hex';
+  if (!/^0x([0-9a-fA-F]{2})*$/.test(sig) || sig === '0x') {
+    return 'signature must be hex bytes';
   }
-  if (hasCode(owner)) return sig.length > 8194 ? 'signature is longer than any ERC-1271 account should return' : null;
+  // A contract account produces whatever its own ERC-1271 implementation accepts, and there is no
+  // length to assume: the Shed itself accepts a one-byte signature from an owner that reads it that
+  // way, and a multi-owner Safe produces its owners' signatures concatenated. So ask only that the
+  // value is hex and not absurd; the account is what decides, and it is asked.
+  if (hasCode(owner)) return sig.length > 65536 ? 'signature is longer than any ERC-1271 account should return' : null;
   return sig.length === 132 ? null : `a signature from ${owner} must be exactly 65 bytes`;
 }
 
@@ -702,14 +708,19 @@ function checksBeforeSigning(offer, role) {
   // fails after both signatures are collected. The page shows the balance; this is the same fact
   // stated as a reason.
   try {
-    const held = BigInt(balanceOf(side.sellToken, side.owner));
-    const ok = held >= BigInt(side.sellAmount);
-    record(
-      'this side holds what it is selling',
-      String(held),
-      ok,
-      `this side must hold ${side.sellAmount} of ${side.sellToken} before it can fund its Shed`,
-    );
+    const spent = cast(['call', side.shed, 'nonces(bytes32)(bool)', side.nonce, '--rpc-url', RPC]).trim() === 'true';
+    if (spent) {
+      record('this side is funded', 'its Shed already ran this bundle', true, null);
+    } else {
+      const held = BigInt(balanceOf(side.sellToken, side.owner));
+      const ok = held >= BigInt(side.sellAmount);
+      record(
+        'this side holds what it is selling',
+        String(held),
+        ok,
+        `this side must hold ${side.sellAmount} of ${side.sellToken} before it can fund its Shed`,
+      );
+    }
   } catch {
     record('this side holds what it is selling', 'not readable', true, null);
   }
@@ -1043,9 +1054,11 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const role = addressRole(offer, String(body.address ?? '').toLowerCase());
       if (!role) return json(res, 403, { error: 'this link is for a specific wallet' });
-      if (!/^0x[0-9a-fA-F]{130}$/.test(body.signature ?? '')) {
-        return json(res, 400, { error: 'signature must be 65 bytes, r || s || v' });
-      }
+      // The owner's own account decides what its signature looks like — a Safe's is not 65 bytes — so
+      // the same shape rule as everywhere else, rather than a fixed length that refuses a valid owner.
+      const who = role === 'maker' ? offer.computed.makerBundle.owner : offer.computed.takerBundle.owner;
+      const shape = signatureProblem(who, body.signature);
+      if (shape) return json(res, 400, { error: shape });
 
       // The computed plan is replayed, never recomputed: a fresh deadline would build a different
       // message and reject a signature that is valid for what was signed.

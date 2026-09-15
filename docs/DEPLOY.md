@@ -47,11 +47,16 @@ every real deployment, on every chain, and the printed addresses must be identic
 live mainnet state for release `private-trade.v1`:
 
 ```
-wrapper    0x7E590589c269c6a5b4C70677bb02255FAd1B4F5C
-handler    0xf3d8bE54858C4467315557eea0D5964E12313d7B
-submitter  0x101dd6e4c4e046993dfD68c0BC6fAdD057Aa379E
-authoriser 0xeB60BA79A6b577CaEE5b01cdb0d471B87B8d6009
+wrapper    0x5C5D1C2e1C8e33f3fd4688250e3d475E383B290e
+handler    0x5e4934aE234D843C1bA79a0a111a231d22BCa6D7
+submitter  0xF58b57d43565DDa171dB3B7FB9aA520579B8921D
+authoriser 0x03ea8dB7ee8ea8bdC282F686e74a1A27C26eD7fC
 ```
+
+These move whenever the wrapper's bytecode changes, because the handler's init code embeds the
+wrapper's address and the other two are compiled against both. `test/PrivateTradeDeploy.t.sol` pins
+all four and fails with "re-pin if that was intended" — re-pin here too, in the same commit, or this
+page describes a deployment that no longer exists.
 
 ## 2. Sepolia
 

@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import {
+  DAI,
   MAKER,
   TAKER,
   USDC,
@@ -396,6 +397,66 @@ test('a contract account decides its own threshold, and its blob is taken as it 
   setChain(root, { signatures: { [MAKER]: blob } });
   const accepted = await call(port, 'POST', `/offers/${offer.id}/signature`, { role: 'maker', signature: blob });
   assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+});
+
+test('a funded side can retry even though its wallet is now empty', async () => {
+  const root = currentRoot;
+  const offer = await createOffer(port, { sellAmount: '6' });
+  await signAs(port, offer.id);
+  const taker = await signAs(port, offer.id, 'taker');
+
+  // The taker holds exactly what it is selling, so funding leaves its wallet empty — which is the
+  // state the retry has to cope with, and the one a wallet-balance check would refuse.
+  setChain(root, { tokens: { [DAI]: { symbol: 'DAI', decimals: 18, balances: { [TAKER]: '100000000000000000000' } } } });
+
+  // Funding succeeded, publishing or posting did not.
+  orderbook.state.rejectOrders = true;
+  const failed = await call(port, 'POST', `/offers/${offer.id}/accept`, taker);
+  assert.equal(failed.status, 502, JSON.stringify(failed.body));
+  assert.equal(failed.body.status, 'recovery_available');
+
+  // The relay moved both sides' sell tokens into their Sheds, so the taker's wallet is empty. Asking
+  // the wallet whether it can fund would refuse the retry for having already funded.
+  const view = await call(port, 'GET', `/offers/${offer.id}/role?address=${TAKER}`);
+  assert.equal(view.body.balance, '0', 'the fixture did not move the tokens, so this test proves nothing');
+  assert.equal(view.body.ready.ok, true, JSON.stringify(view.body.ready.problems));
+  assert.ok(
+    view.body.ready.checks.some((entry) => /funded/.test(entry.name)),
+    JSON.stringify(view.body.ready.checks.map((entry) => entry.name)),
+  );
+
+  orderbook.state.rejectOrders = false;
+  const retried = await call(port, 'POST', `/offers/${offer.id}/accept`, taker);
+  assert.equal(retried.status, 202, `recovery is advertised but blocked: ${JSON.stringify(retried.body)}`);
+});
+
+test('a contract owner may return a signature that is not 65 bytes', async () => {
+  const root = currentRoot;
+  // The Shed itself accepts whatever its owner's ERC-1271 implementation accepts, and a one-byte
+  // signature is a shape a real account can use. The service must not impose a length on it.
+  setChain(root, { contracts: [MAKER], signatures: { [MAKER]: '0x01' } });
+  const offer = await createOffer(port, { sellAmount: '6' });
+
+  const accepted = await call(port, 'POST', `/offers/${offer.id}/signature`, { role: 'maker', signature: '0x01' });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+
+  const wrong = await call(port, 'POST', `/offers/${offer.id}/signature`, { role: 'maker', signature: '0x02' });
+  assert.equal(wrong.status, 400, 'the account accepted a signature it should have refused');
+});
+
+test('one unreadable chain read is not remembered as a fact', async () => {
+  const root = currentRoot;
+  // Written before anything reads this account, because the first read happens while the offer is
+  // created — and a read that failed is the one that must not be remembered.
+  fs.writeFileSync(path.join(root, 'code-fault'), '');
+  const offer = await createOffer(port, { sellAmount: '6' });
+  const during = await call(port, 'GET', `/offers/${offer.id}/role?address=${MAKER}`);
+  assert.equal(during.body.owner.isContract, true, 'an unreadable read should answer conservatively');
+
+  fs.rmSync(path.join(root, 'code-fault'));
+  const after = await call(port, 'GET', `/offers/${offer.id}/role?address=${MAKER}`);
+  assert.equal(after.body.owner.isContract, false, 'the failed read was cached as a fact about the account');
+  assert.equal(after.body.funding.mode, 'permit', 'the owner is still being treated as a contract account');
 });
 
 // --- runner ---------------------------------------------------------------------------------------
