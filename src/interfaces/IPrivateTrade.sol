@@ -191,6 +191,11 @@ interface IPrivateTradeWrapper {
   /// @notice Counterparty currently being settled, or `address(0)` outside a private trade settlement.
   function activeTaker() external view returns (address);
 
+  /// @notice The pair currently being settled, in one read.
+  /// @dev The two facts are set together and read together, so asking twice is two cross-contract
+  /// calls for one answer.
+  function activeTrade() external view returns (bytes32 offerId, address taker);
+
   /// @notice Durable lifecycle state for an offer.
   function offerState(bytes32 offerId) external view returns (PrivateTradeOfferState);
 

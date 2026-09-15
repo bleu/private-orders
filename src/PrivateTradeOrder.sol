@@ -117,7 +117,7 @@ contract PrivateTradeOrder is IConditionalOrderGenerator {
   /// @dev The heart of the protocol: `activeOfferId` is non-zero only during a settlement that
   /// the wrapper has already proven to be this exact pair.
   function _requireActiveTrade(PrivateTradeTerms memory terms) private view returns (address activeTaker) {
-    bytes32 activeOfferId = WRAPPER.activeOfferId();
+    (bytes32 activeOfferId, address taker_) = WRAPPER.activeTrade();
     if (activeOfferId == bytes32(0)) revert PrivateTrade_NoActiveTrade();
 
     bytes32 expectedOfferId = PrivateTradeLib.offerId(terms.offer);
@@ -125,7 +125,7 @@ contract PrivateTradeOrder is IConditionalOrderGenerator {
       revert PrivateTrade_WrongActiveOffer(expectedOfferId, activeOfferId);
     }
 
-    activeTaker = WRAPPER.activeTaker();
+    activeTaker = taker_;
     if (activeTaker != terms.taker) revert PrivateTrade_WrongActiveTaker(terms.taker, activeTaker);
   }
 

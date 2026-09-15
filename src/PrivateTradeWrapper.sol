@@ -92,6 +92,11 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
   }
 
   /// @inheritdoc IPrivateTradeWrapper
+  function activeTrade() external view returns (bytes32, address) {
+    return (_activeOfferId, _activeTaker);
+  }
+
+  /// @inheritdoc IPrivateTradeWrapper
   function activeTaker() external view returns (address) {
     return _activeTaker;
   }
@@ -169,6 +174,14 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
     bytes32 offerId_ = _validateTerms(declaredOfferId, terms);
     _validateProposal(proposal, terms, offerId_);
 
+    // Cheapest first. A consumed or cancelled offer is refused before the payload is decoded, every
+    // order is rebuilt and compared, and the fills are read — which is the entire cost of a submission
+    // that was never going to be accepted. The consumed *write* stays where it is, after everything
+    // has been checked.
+    PrivateTradeOfferState state = _offerStates[offerId_];
+    if (state == PrivateTradeOfferState.Consumed) revert PrivateTrade_OfferConsumed(offerId_);
+    if (state == PrivateTradeOfferState.Cancelled) revert PrivateTrade_OfferCancelled(offerId_);
+
     (
       IERC20[] memory tokens,
       uint256[] memory clearingPrices,
@@ -176,19 +189,15 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
       GPv2Interaction.Data[][3] memory interactions
     ) = _decodeSettleData(settleData);
 
-    _validateSettlement(tokens, clearingPrices, trades, interactions, terms);
+    // D2: the same orders the settlement was just validated against, rather than extracting and
+    // rebuilding them a second time to derive the identifiers.
+    GPv2Order.Data[2] memory settled = _validateSettlement(tokens, clearingPrices, trades, interactions, terms);
 
     // Read before the settlement runs, so that afterwards we can tell "the settlement succeeded" from
     // "the trade happened".
-    (guard.makerUid, guard.takerUid) = _orderUids(tokens, trades, terms);
+    (guard.makerUid, guard.takerUid) = _orderUids(settled, terms);
     guard.makerFilledBefore = _filled(guard.makerUid);
     guard.takerFilledBefore = _filled(guard.takerUid);
-
-    PrivateTradeOfferState state = _offerStates[offerId_];
-    if (state == PrivateTradeOfferState.Consumed) {
-      revert PrivateTrade_OfferConsumed(offerId_);
-    }
-    if (state == PrivateTradeOfferState.Cancelled) revert PrivateTrade_OfferCancelled(offerId_);
 
     // Effects precede the settlement call. Any downstream revert rolls this transition back.
     _offerStates[offerId_] = PrivateTradeOfferState.Consumed;
@@ -326,7 +335,7 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
     GPv2Trade.Data[] memory trades,
     GPv2Interaction.Data[][3] memory interactions,
     PrivateTradeTerms memory terms
-  ) private view {
+  ) private view returns (GPv2Order.Data[2] memory expected) {
     if (block.timestamp > terms.offer.validTo) revert PrivateTrade_Expired();
 
     // Exactly the pair, and nothing else. The token array is not required to be exactly two
@@ -349,7 +358,6 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
 
     address[2] memory expectedOwners = [terms.offer.maker, terms.taker];
 
-    GPv2Order.Data[] memory expected = new GPv2Order.Data[](2);
     expected[0] = PrivateTradeLib.makerOrder(terms, trades[0].appData);
     expected[1] = PrivateTradeLib.takerOrder(terms, trades[1].appData);
 
@@ -392,19 +400,13 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
   /// `_validateSettlement` has already required to equal the orders the terms imply.
   ///
   /// Separate from `_validateSettlement` because neither function has room for the other's locals.
-  function _orderUids(IERC20[] memory tokens, GPv2Trade.Data[] memory trades, PrivateTradeTerms memory terms)
+  function _orderUids(GPv2Order.Data[2] memory settled, PrivateTradeTerms memory terms)
     private
     view
     returns (bytes memory makerUid, bytes memory takerUid)
   {
     bytes32 domainSeparator = SETTLEMENT.domainSeparator();
-    address[2] memory owners = [terms.offer.maker, terms.taker];
-    for (uint256 i = 0; i < 2; ++i) {
-      GPv2Order.Data memory order;
-      _extractOrder(trades[i], tokens, order);
-      bytes memory uid = abi.encodePacked(GPv2Order.hash(order, domainSeparator), owners[i], order.validTo);
-      if (i == 0) makerUid = uid;
-      else takerUid = uid;
-    }
+    makerUid = abi.encodePacked(GPv2Order.hash(settled[0], domainSeparator), terms.offer.maker, settled[0].validTo);
+    takerUid = abi.encodePacked(GPv2Order.hash(settled[1], domainSeparator), terms.taker, settled[1].validTo);
   }
 }

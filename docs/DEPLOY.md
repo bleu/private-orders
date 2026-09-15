@@ -47,8 +47,8 @@ every real deployment, on every chain, and the printed addresses must be identic
 live mainnet state for release `private-trade.v1`:
 
 ```
-wrapper    0x809C6AB848a39E3490c27Ae25bb0b15D7c23F1F6
-handler    0x25C19fc6F60A3F8E62AEEB41Dda7289909895B00
+wrapper    0x6AF00f967E04fE003ac2120fee81E5D32Ed68e70
+handler    0x39e201DA745A9f6050B27736276515489385Ae57
 submitter  0xe833E42Ad12bF2c72Ee4B761Ca020F638EF28AE5
 authoriser 0x46724A7550549C4Df246819F6D4Eb4a22AF9600B
 ```
