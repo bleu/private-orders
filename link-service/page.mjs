@@ -492,13 +492,17 @@ function render() {
 
   // What this wallet's kind means, said before the first prompt instead of after a failure.
   if (owner.isContract) {
+    const hash = ready.account && ready.account.messageHash;
     app.append(frag('<div class="note">This wallet is a smart contract account, not an account with a key. ' +
-      'It approves its Shed with a transaction, and it authorises the order by signing a message its own rules ' +
-      'accept' +
+      'It authorises by approving a hash, and the hash is its own — the page cannot build the message for it. ' +
       (ready.account && ready.account.threshold
-        ? ' — ' + esc(ready.account.threshold) + ' of ' + esc(ready.account.owners) + ' owners, which the wallet collects'
+        ? esc(ready.account.threshold) + ' of ' + esc(ready.account.owners) + ' owners have to approve it, which the account collects. '
         : '') +
-      '. The prompt is the wallet\u2019s own, so it may ask for more than one signature.</div>'));
+      (hash
+        ? '<br>Approve <span class="addr">' + esc(hash) + '</span> in your own account, then press the button below. ' +
+          'It sends an empty signature, which is how an account that has approved a hash answers.'
+        : '<br><span class="warn">This account\u2019s approval hash could not be read from the chain.</span>') +
+      '</div>'));
   }
 
   app.append(frag('<div class="note">Your wallet will ask ' + esc(prompts) + '.' +
@@ -688,32 +692,22 @@ function signTyped(typedData) {
 
 /// Ask the wallet to authorise a digest.
 ///
-/// An account holding a key signs the trade's own EIP-712 message. A contract account is asked for a
-/// **Safe message** instead, because that is what it verifies: Safe checks its owners' signatures over
-/// hashMessage(digest), so handing it the trade's typed data produces a signature it refuses — and
-/// the failure names a signer, not the message. A SafeMessage with the digest as its
-/// message hashes to exactly what it checks, which is why this is a request shape and not a second
-/// signature scheme.
+/// An account holding a key signs the trade's own EIP-712 message. A contract account cannot be asked
+/// that way: the message it verifies is framed with its own EIP-712 domain, and that domain depends on
+/// the account's version — Safe 1.3 carries a name and a version, Safe 1.4 and later do not — so a page
+/// that builds the request itself produces a signature the account refuses. It is also not the page's
+/// business: gathering however many owners the account's threshold needs is the account's own tooling.
 ///
-/// Gathering however many owners its threshold needs is the wallet's business, not this page's: the
-/// Safe App, WalletConnect and the Safe SDK all do it, and they return one blob.
+/// So this does not build a message. The service computed the hash the account must approve, from the
+/// account's own domain separator; the page shows it, the account approves it, and the empty signature
+/// below is how an account that has approved a hash answers its own ERC-1271 check.
 function signDigest(typedData, digest) {
   if (!(me.owner && me.owner.isContract)) return signTyped(typedData);
-  if (!digest) throw new Error('this wallet needs the digest of the message it is asked to authorise');
-  const account_ = (me.ready && me.ready.account) || {};
-  return signTyped({
-    domain: {
-      name: 'Safe',
-      // A Safe's domain carries its own version, read from the account. A message built with a
-      // different one hashes to something the account will not accept.
-      version: account_.version || '1.3.0',
-      chainId: Number((me.bundle && me.bundle.typedData.domain.chainId) || walletChain || 1),
-      verifyingContract: me.owner.address,
-    },
-    types: { SafeMessage: [{ name: 'message', type: 'bytes' }] },
-    primaryType: 'SafeMessage',
-    message: { message: digest },
-  });
+  const approved = (me.ready && me.ready.account && me.ready.account.messageHash) || null;
+  if (!approved) {
+    throw new Error('this account approves a hash instead of signing, and its hash could not be read from the chain');
+  }
+  return Promise.resolve('0x');
 }
 
 function poll() {

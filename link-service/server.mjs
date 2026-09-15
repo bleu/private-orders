@@ -420,7 +420,7 @@ function withdrawPlan(offer, role) {
 /// and not a digest it never saw.
 function verifies({ typedData, digest, signature, owner }) {
   const sig = signature ?? '';
-  if (!/^0x([0-9a-fA-F]{2})*$/.test(sig) || sig === '0x') return null;
+  if (!/^0x([0-9a-fA-F]{2})*$/.test(sig)) return null;
 
   if (hasCode(owner)) {
     if (!digest) return null;
@@ -453,9 +453,11 @@ function verifies({ typedData, digest, signature, owner }) {
 /// signatures concatenated in ascending address order, a nested scheme possibly more.
 function signatureProblem(owner, signature) {
   const sig = signature ?? '';
-  if (!/^0x([0-9a-fA-F]{2})*$/.test(sig) || sig === '0x') {
-    return 'signature must be hex bytes';
-  }
+  if (!/^0x([0-9a-fA-F]{2})*$/.test(sig)) return 'signature must be hex bytes';
+  // An empty blob is a shape a contract account can return: its ERC-1271 check falls back to the
+  // hashes its owners have approved on chain, which is how a multi-owner account signs at all. The
+  // account is what decides, so empty is refused only for an account with a key.
+  if (sig === '0x' && !hasCode(owner)) return `a signature from ${owner} must be exactly 65 bytes`;
   // A contract account produces whatever its own ERC-1271 implementation accepts, and there is no
   // length to assume: the Shed itself accepts a one-byte signature from an owner that reads it that
   // way, and a multi-owner Safe produces its owners' signatures concatenated. So ask only that the
@@ -668,6 +670,28 @@ async function status(offer) {
   return { status: 'settling', orderUid: offer.orderUid, settlementTx: txHash, wrapperState, evidence };
 }
 
+/// The hash a contract account approves for a message, computed from the account's own domain
+/// separator by the same Solidity the account's handler uses.
+///
+/// A client cannot build this itself. The EIP-712 domain depends on the account's version — Safe 1.3
+/// carries a name and a version, Safe 1.4 and later do not — so a request built against one shape
+/// produces a signature the other refuses, and the refusal names a signer rather than the message.
+/// Reading the separator the account computes for itself is version-agnostic.
+function ownerMessageHash(owner, digest) {
+  if (!digest) return null;
+  try {
+    const out = execFileSync('forge', ['script', 'script/OwnerMessageHash.s.sol', '--rpc-url', RPC], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, OWNER_MESSAGE_OWNER: owner, OWNER_MESSAGE_DIGEST: digest },
+    });
+    return (out.match(/messageHash (0x[0-9a-fA-F]{64})/) ?? [])[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /// What a party must do before signing.
 ///
 /// A token whose permit can be shown as typed data is funded by signature: the party signs, the
@@ -815,6 +839,8 @@ function checksBeforeSigning(offer, role) {
       // A Safe's EIP-712 domain carries its own version, and a signature over a message built with
       // a different one hashes to something it will not accept. The account can be asked.
       account.version = castString(cast(['call', side.owner, 'VERSION()(string)', '--rpc-url', RPC]));
+      // What this account must approve on chain, since it cannot return a signature from a key.
+      account.messageHash = ownerMessageHash(side.owner, side.digest);
       record('this account can be authorised by its own rules', `${account.threshold} of ${account.owners} owners`, true, null);
     } catch {
       record('this account can be authorised by its own rules', 'not a readable multisig', true, null);

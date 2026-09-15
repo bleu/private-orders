@@ -142,6 +142,15 @@ if (script.endsWith('LinkCompute.s.sol')) {
   process.exit(0);
 }
 
+if (script.endsWith('OwnerMessageHash.s.sol')) {
+  // The hash a contract account must approve. The real script reads the account's own domain
+  // separator; the fake answers with a value derived from the request so a test can recognise it.
+  const crypto = require('node:crypto');
+  const seed = (process.env.OWNER_MESSAGE_OWNER ?? '') + (process.env.OWNER_MESSAGE_DIGEST ?? '');
+  process.stdout.write('messageHash 0x' + crypto.createHash('sha256').update(seed).digest('hex') + '\\n');
+  process.exit(0);
+}
+
 if (script.endsWith('LinkRelay.s.sol')) {
   if (fs.existsSync(root + '/relay-fault')) fail('the relay failed on purpose');
   const broadcasting = args.includes('--broadcast');
@@ -309,6 +318,12 @@ if (args[0] === 'call') {
   }
   if (signature.startsWith('isSolver')) {
     process.stdout.write(state.unallowlisted ? 'false' : 'true');
+    process.exit(0);
+  }
+  if (signature.startsWith('VERSION')) {
+    // A contract account's own version, which a client must not use to build its EIP-712 domain: the
+    // domain shape changed between Safe versions, which is why the hash is read from the account.
+    process.stdout.write('"1.5.0"');
     process.exit(0);
   }
   if (signature.startsWith('getThreshold')) {

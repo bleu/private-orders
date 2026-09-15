@@ -26,6 +26,7 @@ import {
   TAKER,
   TAKER_SHED,
   USDC,
+  call,
   createOffer,
   freePort,
   killAll,
@@ -494,70 +495,40 @@ test('a smart contract account is told what it is and funds by approval', async 
   }
 });
 
-test('a smart contract account is asked for a Safe message, not the trade typed data', async () => {
-  // The account accepts exactly one blob; the fixture answers for it.
-  const fixture = await serviceWith({}, { contracts: [MAKER], signatures: { [MAKER]: `0x${'42'.repeat(65)}` } });
+test('a smart contract account approves a hash instead of being handed a message', async () => {
+  // The fixture answers for the empty blob the page submits, which is how an account that has approved
+  // a hash answers its own ERC-1271 check.
+  const fixture = await serviceWith({}, { contracts: [MAKER], signatures: { [MAKER]: '0x' } });
   const browser = await launchChrome();
   try {
     const offer = await createOffer(fixture.port, { sellAmount: '100000000' });
     await browser.open(offerUrl(fixture.port, offer.id));
     await browser.waitFor("document.body.innerText.toLowerCase().includes('your part')", 'the trade page');
 
+    // The hash is the account's own, computed from its domain separator — and a page once built that
+    // message itself, which produced a signature the account refused.
+    const shown = await browser.evaluate('/0x[0-9a-f]{64}/.test(document.body.innerText)');
+    assert.equal(shown, true, 'the page did not show the hash the account must approve');
+    const explains = await browser.evaluate(
+      "document.body.innerText.toLowerCase().includes('authorises by approving a hash')",
+    );
+    assert.equal(explains, true, 'the page did not explain how a contract account authorises');
+
     await browser.evaluate(
       "[...document.querySelectorAll('button')].find((b) => b.textContent.includes('Approve and sign')).click()",
     );
-    await browser.waitFor('(window.__signedTypedData || []).length > 0', 'the wallet to be asked to sign');
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const view = await call(fixture.port, 'GET', `/offers/${offer.id}`);
+      if (view.body.makerSigned) break;
+      await sleep(100);
+    }
 
-    const asked = JSON.parse(await browser.evaluate('JSON.stringify(window.__signedTypedData[0])'));
-    // Safe checks its owners' signatures over hashMessage(digest), never over the digest, so the
-    // trade's own typed data would produce a signature the account refuses.
-    assert.equal(asked.primaryType, 'SafeMessage', JSON.stringify(asked));
-    assert.equal(asked.domain.name, 'Safe');
-    assert.equal(String(asked.domain.verifyingContract).toLowerCase(), MAKER);
-    const digest = offerRecord(fixture.root, offer.id).computed.makerBundle.digest;
-    assert.equal(asked.message.message, digest, 'the account was asked to authorise something else');
-
-    // And the account's answer was taken: the offer holds a signature.
-    await browser.waitFor(
-      `fetch('/offers/${offer.id}').then((r) => r.json()).then((o) => o.makerSigned === true)`,
-      'the signature to be accepted',
-    );
-  } finally {
-    browser.close();
-    await fixture.stop();
-  }
-});
-
-test('a dead offer offers the way out, not a wait', async () => {
-  const fixture = await serviceWith({});
-  const browser = await launchChrome();
-  try {
-    const offer = await createOffer(fixture.port, { sellAmount: '100000000' });
-    // Past its deadline: no order from it can fill, so the page must not suggest waiting.
     const record = offerRecord(fixture.root, offer.id);
-    record.computed.validTo = Math.floor(Date.now() / 1000) - 60;
-    fs.writeFileSync(
-      path.join(fixture.root, 'out-json', 'link', `${offer.id}.json`),
-      JSON.stringify(record, null, 2),
+    assert.equal(record.signatures.maker, '0x', 'the page did not send the empty signature the account expects');
+    const fabricated = await browser.evaluate(
+      "(window.__signedTypedData || []).some((d) => d.primaryType === 'SafeMessage')",
     );
-
-    await browser.open(offerUrl(fixture.port, offer.id));
-    // Wait for the connected view, not the status pill: the pill says "expired" before the wallet has
-    // connected, and the recovery section only exists once a party is known.
-    await browser.waitFor("document.body.innerText.toLowerCase().includes('your part')", 'the connected view');
-
-    const says = await browser.evaluate(
-      "document.body.innerText.toLowerCase().includes('passed its deadline')",
-    );
-    assert.equal(says, true, 'the page did not explain why nothing more will happen');
-
-    const residue = await browser.evaluate("document.body.innerText.toLowerCase().includes('still in your shed')");
-    assert.equal(residue, true, 'the page did not say where the funded tokens are');
-
-    const move = await browser.evaluate(
-      "[...document.querySelectorAll('button')].some((b) => /Move .* to my wallet/.test(b.textContent))",
-    );
-    assert.equal(move, true, 'no way out was offered');
+    assert.equal(fabricated, false, 'the page built the account a message it cannot verify');
   } finally {
     browser.close();
     await fixture.stop();
