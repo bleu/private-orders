@@ -73,7 +73,14 @@ library TokenPermit {
   /// In the second case the permit call does nothing and funding fails at `transferFrom`, which the
   /// relay reports with the token's own error.
   function kind(address token) internal view returns (Kind) {
-    if (domainSeparator(token) == bytes32(0)) return Kind.None;
+    return _kind(token, domainSeparator(token));
+  }
+
+  /// @dev The same question, given a separator that has already been read. `build` needs both the kind
+  /// and the separator, and asking the token twice for the same answer is a wasted external call on
+  /// every permit it constructs.
+  function _kind(address token, bytes32 separator) private view returns (Kind) {
+    if (separator == bytes32(0)) return Kind.None;
     if (_existsEip2612(token)) return Kind.Eip2612;
     if (_existsDaiLike(token)) return Kind.DaiLike;
     return Kind.None;
@@ -87,7 +94,8 @@ library TokenPermit {
     view
     returns (Permit memory permit)
   {
-    permit.kind = kind(token);
+    bytes32 separator = domainSeparator(token);
+    permit.kind = _kind(token, separator);
     permit.token = token;
     permit.owner = owner;
     permit.spender = spender;
@@ -95,7 +103,7 @@ library TokenPermit {
     permit.nonce = nonces(token, owner);
     permit.deadline = deadline;
     permit.allowed = true;
-    permit.domainSeparator = domainSeparator(token);
+    permit.domainSeparator = separator;
     permit.name = name(token);
     permit.version = _resolveVersion(token, permit.name, permit.domainSeparator, version(token));
   }

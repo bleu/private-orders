@@ -139,7 +139,10 @@ library ShedBundle {
     result[0] = Call({
       target: composableCoW,
       value: 0,
-      callData: abi.encodeCall(ComposableCoW.remove, (ComposableCoW(composableCoW).hash(makerParams))),
+      // `ComposableCoW.hash` is `keccak256(abi.encode(params))`; computed here rather than called, so
+      // building the bundle does not pay for an external call to a pure function. The definition is the
+      // one upstream uses and a test pins the two together.
+      callData: abi.encodeCall(ComposableCoW.remove, (keccak256(abi.encode(makerParams)))),
       allowFailure: false,
       isDelegateCall: false
     });
@@ -184,7 +187,13 @@ library ShedBundle {
         )
       );
     }
-    return keccak256(abi.encode(EXECUTE_HOOKS_TYPE_HASH, keccak256(abi.encodePacked(hashes)), nonce, deadline));
+    // Hashed where they already are, rather than copying them into a packed buffer first: the array is
+    // exactly the bytes that would be packed, contiguous and in order.
+    bytes32 callsHash;
+    assembly ("memory-safe") {
+      callsHash := keccak256(add(hashes, 0x20), mul(mload(hashes), 0x20))
+    }
+    return keccak256(abi.encode(EXECUTE_HOOKS_TYPE_HASH, callsHash, nonce, deadline));
   }
 
   /// @notice The digest an owner signs.
@@ -301,9 +310,8 @@ library ShedBundle {
     view
     returns (bool)
   {
-    bytes32 digest_ = digest(bundle_, shedFactory);
-
     if (bundle_.owner.code.length > 0) {
+      bytes32 digest_ = digest(bundle_, shedFactory);
       (bool ok, bytes memory result) =
         bundle_.owner.staticcall(abi.encodeCall(IERC1271.isValidSignature, (digest_, signature)));
       return ok && result.length >= 32 && abi.decode(result, (bytes4)) == MAGIC_VALUE_1271;

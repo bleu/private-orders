@@ -37,10 +37,14 @@ contract PrivateTradeDeployTest is Test {
     assertEq(d.authoriser, _pinnedAuthoriser(), "authoriser address moved: re-pin if that was intended");
   }
 
-  /// @dev The same deployer, salt and settlement give the same four addresses on any chain, because
-  /// `CREATE2` hashes none of the chain. This is the property the Sepolia rehearsal relies on: one
-  /// allowlist entry, one audit, one set of addresses to wire into the service.
-  function test_addressesDoNotDependOnTheChain() public {
+  /// @dev The same deployer, salt and settlement derive the same four addresses under a different chain
+  /// id, because `CREATE2` hashes none of the chain. This is the property the Sepolia rehearsal relies
+  /// on: one allowlist entry, one audit, one set of addresses to wire into the service.
+  ///
+  /// It compares the derivation, not two live deployments — the rehearsal is what proves deployment.
+  /// Named for what it does rather than for the conclusion, because the difference matters when the
+  /// rehearsal is what someone is relying on.
+  function test_theDerivationDoesNotDependOnTheChain() public {
     vm.chainId(MAINNET);
     PrivateTradeDeployment.Deployment memory onMainnet = PrivateTradeDeployment.predict(SETTLEMENT, salt());
 

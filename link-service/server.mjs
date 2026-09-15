@@ -853,7 +853,14 @@ function checksBeforeSigning(offer, role) {
   );
 
   const expiry = Number(computed.validTo);
-  const live = expiry > 0 && expiry * 1000 > Date.now();
+  // The chain allows a fill at exactly `validTo` (`block.timestamp > validTo` is what it refuses), so
+  // the same boundary is used here. Strictly-later here and strictly-after in `status` meant the two
+  // disagreed for one second about whether an offer was dead.
+  //
+  // The clock is the host's, not the chain's. That is a real difference — a host running ahead would
+  // refuse an offer the chain would still accept — and reading the chain's time on every check costs a
+  // round trip. The boundary is aligned; the clock source is not, and that is the honest limit.
+  const live = expiry > 0 && expiry * 1000 >= Date.now();
   record('the offer has not expired', new Date(expiry * 1000).toISOString(), live, 'the offer has expired');
 
   // The relay pulls the sell tokens from the party's own account, so a party who does not hold them
