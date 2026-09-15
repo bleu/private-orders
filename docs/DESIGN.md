@@ -114,7 +114,8 @@ is not a bilateral trade, whatever the orders say.
 
 ## How a private trade executes
 
-There is no orderbook, no auction, no price discovery and no solver competition. That is the premise
+The intended transport is: no orderbook, no auction, no price discovery and no solver competition.
+That is the premise
 of the RFC, and the on-chain design depends on it: a private trade's orders are valid *only* inside
 the settlement that pairs them, so publishing them serves no purpose.
 
@@ -128,7 +129,7 @@ The path is:
 5. GPv2Settlement settles          -> both legs move, or nothing does
 ```
 
-Step 4 is the whole integration. The orders never become public, so there is nothing to discover,
+Step 4 is the whole integration. On this path the orders never become public, so there is nothing to discover,
 quote, rank or compete over.
 
 Step 4 is built twice, deliberately:
@@ -158,6 +159,16 @@ The submitter is transport, not a trust anchor. It cannot fill one half without 
 change the terms, cannot redirect the proceeds, and cannot reuse either order elsewhere — the wrapper
 and the order handlers refuse all of that on-chain. A misbehaving submitter can only decline to
 submit.
+
+## What the service currently does instead
+
+This document describes the intended path. The link service as built posts the taker's order to the
+orderbook (`link-service/server.mjs`, `postOrder`) and relies on the maker-JIT/taker-fulfillment route
+described in [JIT-PATH.md](JIT-PATH.md), so on that path the taker's order — and, through the shared
+appData document, both parties' wallet addresses and terms — is public before execution. The reasoning
+below is why the direct path exists and what it would take; it is not a description of the running
+service. Do not read "the orders never become public" as a property of what is deployed until the
+submission route is changed.
 
 ## If you route it through the standard flow instead
 

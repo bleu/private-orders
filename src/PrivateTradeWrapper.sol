@@ -125,7 +125,7 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
   }
 
   /// @inheritdoc ICowWrapper
-  /// @param wrapperData `abi.encode(bytes32 declaredOfferId, PrivateTradeTerms terms)`
+  /// @param wrapperData `abi.encode(bytes32 declaredOfferId, PrivateTradeTerms terms, PrivateTradeProposal.Proposal proposal)`
   function validateWrapperData(bytes calldata wrapperData) external pure override {
     (bytes32 declaredOfferId, PrivateTradeTerms memory terms,) =
       abi.decode(wrapperData, (bytes32, PrivateTradeTerms, PrivateTradeProposal.Proposal));

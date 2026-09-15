@@ -29,10 +29,12 @@ Canonical addresses are identical on mainnet and Sepolia, so **Sepolia is a fait
 
 ## Phase 1 — freeze the deployment (1 day)
 
-4. Deploy deterministically. `script/DeployPrivateTrade.s.sol` uses `new`, so the address depends on
-   the deployer's nonce. An audit and an allowlist entry cover one bytecode at one address: use
-   CREATE2 with a fixed salt (`cow-shed`'s own `script/Deploy.s.sol` is the pattern) so Sepolia and
-   mainnet land on the same address and the audited artefact is the deployed artefact.
+4. ~~Deploy deterministically.~~ Done. `script/DeployPrivateTrade.s.sol` deploys the four contracts with
+   `{salt: salt}`, `PrivateTradeDeployment.predict` derives the addresses from the canonical CREATE2
+   deployer, and the script refuses to finish if what was deployed is not what was predicted. Sepolia
+   and mainnet land on the same address, so the audited artefact is the deployed artefact. The
+   addresses for the current bytecode are pinned in `test/PrivateTradeDeploy.t.sol` and listed in
+   [DEPLOY.md](DEPLOY.md).
 5. Freeze the service config: `RPC`, `ORDERBOOK_URL`, `PUBLIC_URL`, `PRIVATE_TRADE_WRAPPER`,
    `PRIVATE_TRADE_HANDLER`, `PRIVATE_TRADE_AUTHORISER`, `COWSHED_COMPOSABLE_COW_FACTORY_ADDRESS`,
    `COMPOSABLE_COW_ADDRESS`, `VAULT_RELAYER_ADDRESS`, `RELAYER_PRIVATE_KEY`.

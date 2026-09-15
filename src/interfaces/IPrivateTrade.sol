@@ -63,7 +63,9 @@ struct PrivateTradeTerms {
 /// @dev Raised when the wrapper's declared `offerId` does not match the offer it carries.
 error PrivateTrade_OfferIdMismatch();
 
-/// @dev Raised when the settlement does not contain exactly two tokens and two trades.
+/// @dev Raised when the settlement does not contain exactly two trades over at least two token entries.
+/// @dev The token array is not required to be exactly two: the driver emits one entry per order side, so
+/// the same token can appear more than once and each trade carries its own indices.
 error PrivateTrade_BadSettlementShape();
 
 /// @dev Raised when any pre/intra/post interaction is present. A private trade executes nothing else.

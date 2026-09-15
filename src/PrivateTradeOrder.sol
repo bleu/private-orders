@@ -73,9 +73,12 @@ contract PrivateTradeOrder is IConditionalOrderGenerator {
   }
 
   /// @inheritdoc IConditionalOrderGenerator
-  /// @dev Off-chain helper: the order a party must authorise for these terms. Mirrors `verify`, and
+  /// @dev Off-chain helper: the order a party must authorise for these terms.
+  ///
+  /// It is not a second `verify`, and a generated order is not proof of anything executable. It
   /// answers with the error codes a watch tower understands, so a dead offer is pruned instead of
-  /// retried forever (`IConditionalOrder.PollNever`).
+  /// retried forever (`IConditionalOrder.PollNever`), and it deliberately runs outside the wrapper's
+  /// window — validation of an order happens in `verify`, against the published pair.
   function getTradeableOrder(address owner, address, bytes32, bytes calldata staticInput, bytes calldata offchainInput)
     external
     view

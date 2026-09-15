@@ -47,8 +47,8 @@ every real deployment, on every chain, and the printed addresses must be identic
 live mainnet state for release `private-trade.v1`:
 
 ```
-wrapper    0x6AF00f967E04fE003ac2120fee81E5D32Ed68e70
-handler    0x39e201DA745A9f6050B27736276515489385Ae57
+wrapper    0x518ee95490fbd36D221BBaC8E3839AF3c1365B93
+handler    0x6bE0461981Fa53828547cFD7A1ca998C24f3a8C9
 submitter  0xe833E42Ad12bF2c72Ee4B761Ca020F638EF28AE5
 authoriser 0x46724A7550549C4Df246819F6D4Eb4a22AF9600B
 ```
@@ -57,6 +57,36 @@ These move whenever the wrapper's bytecode changes, because the handler's init c
 wrapper's address and the other two are compiled against both. `test/PrivateTradeDeploy.t.sol` pins
 all four and fails with "re-pin if that was intended" — re-pin here too, in the same commit, or this
 page describes a deployment that no longer exists.
+
+## What to send the CoW team
+
+Their bar for a staging seat is short: the source must be non-upgradable and verified. Four contracts
+are non-upgradable — no proxy, no owner, no initializer, no setter, no `selfdestruct` — and
+`script/DeployPrivateTrade.s.sol` deploys them through CREATE2 with a fixed salt, so one verified
+address describes the artefact on every chain.
+
+The request itself needs to say what is being asked for, because "staging" does not identify a chain:
+
+- **Chain and endpoints.** The chain proposed for the rehearsal, its settlement contract, and its
+  authenticator. The four addresses are derived from the settlement, so a different settlement gives
+  different addresses — recompute rather than copying the table above.
+- **What to allowlist, and what will call it.** The wrapper needs a seat because it is the direct
+  caller of `GPv2Settlement.settle`. The handler and the authoriser need review and deployment, not a
+  seat. If a stateless submitter is part of the request, say so explicitly: it is a separate surface,
+  its destinations currently come from the caller, and a reviewer is entitled to ask about that.
+- **Which route is being demonstrated.** This repository contains two: the maker-JIT/taker-fulfillment
+  route through the orderbook, which is what the link service runs today and which publishes the
+  taker's order, and a direct submission path in [DESIGN.md](DESIGN.md) that publishes nothing and
+  needs an allowlisted submitter. Name one, with its submitting identity and who pays gas.
+- **The properties to check.** Paired Shed-owned ERC20 orders, exact reciprocal execution, no
+  settlement interactions, the wrapper required to be last in the chain, durable single-use offer
+  state, and proceeds to the party's own wallet.
+- **Evidence.** The local suite, the regression gate, and one pair driven end to end against the
+  offline stack, plus the plan for reproducing it on the agreed chain.
+
+Two things worth stating plainly rather than leaving to be discovered: the wrapper cannot share a
+settlement with another bundle (`PrivateTrade_NotLastWrapper`, so a solver must settle it alone), and
+`metadata.wrappers[].address` is the field the services read even though the docs say `target`.
 
 ## 2. Sepolia
 

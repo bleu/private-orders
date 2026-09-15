@@ -94,18 +94,18 @@ contract PrivateTradeDeployTest is Test {
   }
 
   function _pinnedWrapper() internal pure returns (address) {
-    return 0x6AF00f967E04fE003ac2120fee81E5D32Ed68e70;
+    return 0x518ee95490fbd36D221BBaC8E3839AF3c1365B93;
   }
 
   function _pinnedHandler() internal pure returns (address) {
-    return 0x39e201DA745A9f6050B27736276515489385Ae57;
+    return 0x6bE0461981Fa53828547cFD7A1ca998C24f3a8C9;
   }
 
   function _pinnedSubmitter() internal pure returns (address) {
-    return 0x734e2dEd1E90DEf83B71F10AB7cC28eAd4E6220D;
+    return 0x897bA1d0020517Cb7a08FFAE1504DA880828699C;
   }
 
   function _pinnedAuthoriser() internal pure returns (address) {
-    return 0x6A95B46a16FB5487d55B82BB1863621A736e01D4;
+    return 0xd449F8F37802959d6369Fd701A9A88f5931588a5;
   }
 }

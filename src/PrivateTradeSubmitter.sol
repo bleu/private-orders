@@ -14,14 +14,24 @@ import {PrivateTradeSubmission} from "./libraries/PrivateTradeSubmission.sol";
 /// either counterparty, or a bot. It holds no funds, stores no state, and owns no keys, so there is
 /// no account to compromise.
 ///
-/// It is deliberately narrow. The only calls it can make are:
+/// It is deliberately narrow in what it *does*: it makes two kinds of call and nothing else.
 ///
-/// - `COWShedFactory.executeHooks`, which runs owner-signed bundles and nothing else;
-/// - `PrivateTradeWrapper.wrappedSettle`, which validates the exact pair on-chain.
+/// - `COWShedFactory.executeHooks`, which runs owner-signed bundles;
+/// - `ICowWrapper.wrappedSettle`, which validates the exact pair on-chain.
+///
+/// It is not narrow in *where* it points them. The wrapper, the factory, the handler and the
+/// settlement all arrive in the caller's `Context`, so what this contract really offers an allowlisted
+/// seat is "call any address that exposes those two selectors, as me". The calls are still bounded by
+/// their own validation — an owner-signed bundle is the only thing `executeHooks` will run, and a pair
+/// both parties signed is the only thing a private wrapper will settle — but a reviewer asked to
+/// authenticate this contract is entitled to ask about that rather than take "narrow" for granted.
+///
+/// Baking the wrapper and the factory into immutables would make the sentence true rather than
+/// accurate, at the cost of one submission contract per deployment and a constructor that has to be
+/// given both. That is the change to make before asking for a seat, if the seat is wanted.
 ///
 /// It cannot call `GPv2Settlement.settle` directly, so being on the solver allowlist grants it less
-/// power than it grants an ordinary solver. A caller can only ever cause a private trade that both
-/// parties already signed to execute, and cannot cause anything else.
+/// power than it grants an ordinary solver.
 contract PrivateTradeSubmitter {
   /// @notice Relay both hook bundles, then submit the pair.
   /// @dev Safe to retry: bundles whose nonce is already consumed are skipped. A pair that already

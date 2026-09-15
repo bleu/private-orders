@@ -24,7 +24,9 @@ interface IShedAdminView {
 ///
 /// **It runs as the Shed.** The party's bundle executes this with `delegatecall`, which is the only
 /// context in which a Shed can read its own admin: the proxy answers `admin()` only when the caller
-/// is the proxy itself, so the implementation can read it and no external caller can. That is also
+/// is the proxy itself, so the implementation can read it and no external caller can. The factory
+/// publishes ownership separately (`COWShedFactory.ownerOf`), which is how a Shed's owner is looked up
+/// from outside; `admin()` is the answer a Shed can get about itself. That is also
 /// why this cannot be a plain call, and why the beneficiary cannot be checked from outside.
 ///
 /// **The side is derived, not declared.** `staticInput` carries a role, and a bundle is composed by
@@ -53,6 +55,12 @@ contract PrivateTradeAuthoriser {
   }
 
   /// @notice Read the terms, check this side's beneficiary, and create the order.
+  /// This is where the "proceeds go to the party" property is established, and it is established here
+  /// and not again at settlement: the wrapper and the order handlers check that each trade's receiver is
+  /// the beneficiary the terms declare, which is the address this checked. A pair built by some other
+  /// means declares its own beneficiary, so the property holds for this creation path rather than for
+  /// any set of terms that happens to be well formed.
+  ///
   /// @dev Called by the party's Shed with `delegatecall`, so `address(this)` is the Shed and the
   /// `create` below is owned by it.
   function createChecked(ComposableCoW composableCoW, IConditionalOrder.ConditionalOrderParams calldata params)
