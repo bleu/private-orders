@@ -2,6 +2,9 @@
 pragma solidity >=0.8.0 <0.9.0;
 
 import {Safe} from "safe/Safe.sol";
+import {COWShed} from "cow-shed/COWShed.sol";
+import {COWShedFactory} from "cow-shed/COWShedFactory.sol";
+import {PrivateTradeProposal} from "../src/libraries/PrivateTradeProposal.sol";
 import {ShedBundle} from "../src/libraries/ShedBundle.sol";
 import {Call} from "cow-shed/ICOWAuthHook.sol";
 import {OwnerMessageHash} from "../script/OwnerMessageHash.s.sol";
@@ -73,6 +76,36 @@ contract PrivateTradeOwnerHashTest is PrivateTradeOwnersTest {
     bytes32 muxer = keccak256(abi.encodePacked(SAFE_MESSAGE_TYPE_HASH(), abi.encode(keccak256(abi.encode(digest)))));
     assertEq(mine, viaFallback, "the CompatibilityFallbackHandler struct hash differs");
     assertEq(mine, muxer, "the SignatureVerifierMuxer struct hash differs");
+  }
+
+  /// @dev The precheck must agree with the Shed about `v`. The Shed hands it to Solady, which takes 27
+  /// or 28 and nothing else; normalising an off-by-27 value here would answer "valid" for a bundle the
+  /// Shed then refuses, which is a precheck that reports the opposite of what happens.
+  function test_offBy27SignatureIsRefusedJustAsTheShedRefusesIt() public {
+    COWShedFactory shedFactory = new COWShedFactory(address(new COWShed()));
+    (address owner, uint256 pk) = makeAddrAndKey("v-subject");
+    ShedBundle.Bundle memory bundle =
+      ShedBundle.Bundle(owner, shedFactory.proxyOf(owner), new Call[](0), bytes32(uint256(1)), block.timestamp + 100);
+
+    (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, ShedBundle.digest(bundle, address(shedFactory)));
+    assertFalse(
+      ShedBundle.validSignature(bundle, address(shedFactory), abi.encodePacked(r, s, v - 27)),
+      "the precheck accepted a signature the Shed refuses"
+    );
+    assertTrue(
+      ShedBundle.validSignature(bundle, address(shedFactory), abi.encodePacked(r, s, v)),
+      "a well-formed signature was refused"
+    );
+    vm.expectRevert();
+    shedFactory.executeHooks(bundle.calls, bundle.nonce, bundle.deadline, bundle.owner, abi.encodePacked(r, s, v - 27));
+  }
+
+  /// @dev A malformed 65-byte blob is reported as an unrecoverable signer, not as a revert from inside
+  /// the check: the caller needs to say "this signature is bad", not surface an ECDSA panic.
+  function test_malformedProposalSignatureIsReportedNotReverted() public {
+    PrivateTradeProposal.Proposal memory proposal;
+    proposal.signature = new bytes(65);
+    assertEq(PrivateTradeProposal.recover(proposal, address(this)), address(0), "a malformed blob was not reported");
   }
 
   function SAFE_MESSAGE_TYPE_HASH() internal pure returns (bytes32) {

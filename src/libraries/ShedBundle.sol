@@ -284,7 +284,9 @@ library ShedBundle {
       s := mload(add(signature, 0x40))
       v := byte(0, mload(add(signature, 0x60)))
     }
-    if (v < 27) v += 27;
+    // `v` is passed through exactly as the Shed passes it: Solady's recovery, which the Shed uses,
+    // takes 27 or 28 and nothing else. Normalising here would accept a bundle the Shed then refuses,
+    // which turns a precheck into a wrong answer.
     return ecrecover(digest(bundle_, shedFactory), v, r, s);
   }
 

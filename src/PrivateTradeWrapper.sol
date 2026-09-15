@@ -224,9 +224,12 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
 
   // --- validation
 
-  /// @dev A BYOS sub-solver signs the settlement it is submitting, so that BYOS cannot run a
-  /// different payload under the same signature and then debit escrow for the revert. This is the
-  /// same job BYOS's `interactionsHash` does for routing proposals, checked on-chain here.
+  /// @dev A BYOS sub-solver signs *the pair* it is submitting, so a submission can be attributed: the
+  /// signature covers the offer, the counterparty and this wrapper. It does not cover the settlement
+  /// bytes — the same pair has more than one encoding, and the commitment travels inside the orders'
+  /// appData, so hashing the calldata would be circular. BYOS's `interactionsHash` covers its routing
+  /// payload; this covers less, which is worth knowing before relying on it to apportion blame for a
+  /// revert.
   ///
   /// An unsigned proposal skips the check: the trade is still fully validated, and anyone may
   /// submit a pair both parties signed.

@@ -47,10 +47,10 @@ every real deployment, on every chain, and the printed addresses must be identic
 live mainnet state for release `private-trade.v1`:
 
 ```
-wrapper    0x5C5D1C2e1C8e33f3fd4688250e3d475E383B290e
-handler    0x5e4934aE234D843C1bA79a0a111a231d22BCa6D7
-submitter  0xF58b57d43565DDa171dB3B7FB9aA520579B8921D
-authoriser 0x03ea8dB7ee8ea8bdC282F686e74a1A27C26eD7fC
+wrapper    0x809C6AB848a39E3490c27Ae25bb0b15D7c23F1F6
+handler    0x25C19fc6F60A3F8E62AEEB41Dda7289909895B00
+submitter  0xe833E42Ad12bF2c72Ee4B761Ca020F638EF28AE5
+authoriser 0x46724A7550549C4Df246819F6D4Eb4a22AF9600B
 ```
 
 These move whenever the wrapper's bytecode changes, because the handler's init code embeds the

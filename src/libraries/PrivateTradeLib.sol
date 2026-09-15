@@ -111,10 +111,32 @@ library PrivateTradeLib {
     uint256 takerSellAmount = makerBuyAmount;
     uint256 takerBuyAmount = makerSellAmount;
 
+    // The settlement checks two things about each leg: the buy amount it will execute — the same
+    // ceiling division below — and its limit price, as
+    // `sellAmount * sellPrice >= buyAmount * buyPrice`. The second does not follow from the first:
+    // amounts of 1 with prices of 1 and 2 divide to exactly the agreed amount and still fail the
+    // settlement's limit check. A predicate that answers "reciprocal" where the settlement reverts is a
+    // predicate nobody can build on, so both are checked here.
+    if (!_limitPriceRespected(makerSellAmount, makerSellPrice, makerBuyAmount, makerBuyPrice)) return false;
+    if (!_limitPriceRespected(takerSellAmount, takerSellPrice, takerBuyAmount, takerBuyPrice)) return false;
+
     uint256 makerExecutedBuy = Math.mulDiv(makerSellAmount, makerSellPrice, makerBuyPrice, Math.Rounding.Up);
     uint256 takerExecutedBuy = Math.mulDiv(takerSellAmount, takerSellPrice, takerBuyPrice, Math.Rounding.Up);
 
     return makerExecutedBuy == makerBuyAmount && takerExecutedBuy == takerBuyAmount;
+  }
+
+  /// @dev `sellAmount * sellPrice >= buyAmount * buyPrice`, the settlement's own limit price check,
+  /// without the multiplication it performs and would panic on. A product that does not fit is not a
+  /// price the settlement can accept, so overflow answers false rather than reverting here.
+  function _limitPriceRespected(uint256 sellAmount, uint256 sellPrice, uint256 buyAmount, uint256 buyPrice)
+    private
+    pure
+    returns (bool)
+  {
+    if (sellPrice != 0 && sellAmount > type(uint256).max / sellPrice) return false;
+    if (buyPrice != 0 && buyAmount > type(uint256).max / buyPrice) return false;
+    return sellAmount * sellPrice >= buyAmount * buyPrice;
   }
 
   /// @notice The scheme a trade must use. Always EIP-1271: both parties are contract accounts so

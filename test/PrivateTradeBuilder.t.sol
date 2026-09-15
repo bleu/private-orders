@@ -37,9 +37,49 @@ contract PrivateTradeBuilderTest is PrivateTradeTestBase {
     uint256[] memory built = PrivateTradeBuilder.clearingPrices(terms);
     uint256[] memory expected = _clearingPrices();
 
-    assertEq(built[0], expected[0]);
-    assertEq(built[1], expected[1]);
+    // The same ratio, not the same integers. The builder reduces by the greatest common divisor so
+    // that the products GPv2 forms from an amount and a price cannot overflow — two legs of 2**128
+    // each panic in the settlement otherwise — which leaves the price exact and changes only its
+    // representation.
+    assertEq(built[0] * expected[1], expected[0] * built[1], "the built prices are a different ratio");
     assertTrue(PrivateTradeLib.isReciprocal(terms, built[0], built[1]), "prices not reciprocal");
+  }
+
+  /// @dev A pair whose amounts are large enough that the unreduced amounts overflow GPv2's arithmetic.
+  /// The reward for the reduction is that this settles at all.
+  function test_largeDenominationPairSettlesWithTheBuiltPrices() public {
+    PrivateTradeTerms memory terms = _terms(address(bob), address(bob));
+    terms.offer.sellAmount = 2 ** 128;
+    terms.offer.buyAmount = 2 ** 128;
+
+    uint256[] memory prices = PrivateTradeBuilder.clearingPrices(terms);
+    assertEq(prices[0], 1, "the reduction did not reach the smallest ratio");
+    assertEq(prices[1], 1, "the reduction did not reach the smallest ratio");
+
+    _fundAndApprove(terms);
+    IConditionalOrder.ConditionalOrderParams memory makerParams = _authorize(alice, PrivateTradeRole.Maker, terms, "m");
+    IConditionalOrder.ConditionalOrderParams memory takerParams = _authorize(bob, PrivateTradeRole.Taker, terms, "t");
+
+    bytes memory data =
+      _settleDataWith(_tokens(), prices, _trades(terms, makerParams, takerParams), _emptyInteractions());
+    vm.prank(solver);
+    wrapper.wrappedSettle(data, _chainedWrapperData(terms));
+    assertEq(usdc.balanceOf(bobOwner), 2 ** 128);
+  }
+
+  /// @dev The predicate must agree with the settlement. These amounts divide to exactly the agreed
+  /// amount under these prices and the settlement still refuses them, because its limit-price check is
+  /// a separate condition.
+  function test_predicateRefusesWhatTheSettlementRefuses() public view {
+    PrivateTradeTerms memory terms = _terms(address(bob), address(bob));
+    terms.offer.sellAmount = 1;
+    terms.offer.buyAmount = 1;
+
+    assertFalse(
+      PrivateTradeLib.isReciprocal(terms, 1, 2, 1, 2),
+      "the predicate calls reciprocal what the settlement refuses on its limit price"
+    );
+    assertTrue(PrivateTradeLib.isReciprocal(terms, 1, 1, 1, 1), "an exact pair was refused");
   }
 
   function test_ordersAndTradesMatchReference() public view {

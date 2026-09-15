@@ -339,7 +339,7 @@ contract LinkCompute is Script {
         sellAmount: request.sellAmount,
         buyToken: request.buyToken,
         buyAmount: request.buyAmount,
-        validTo: uint32(block.timestamp + request.validFor),
+        validTo: _validTo(request.validFor),
         salt: request.salt
       }),
       taker: COWShedFactory(request.shedFactory).proxyOf(request.allowedTaker),
@@ -347,6 +347,15 @@ contract LinkCompute is Script {
       makerBeneficiary: request.maker,
       takerBeneficiary: request.allowedTaker
     });
+  }
+
+  /// @dev The order carries a `uint32` expiry, so a request that does not fit one would truncate
+  /// silently: the duration asked for and the deadline computed would disagree, and the offer would
+  /// expire at a time nobody chose. Refused instead, with the limit in the message.
+  function _validTo(uint256 validFor) private view returns (uint32) {
+    uint256 limit = type(uint32).max - block.timestamp;
+    require(validFor <= limit, string.concat("validFor is too large: the most is ", vm.toString(limit), " seconds"));
+    return uint32(block.timestamp + validFor);
   }
 
   function _request() private view returns (Request memory request) {

@@ -27,8 +27,11 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 /// @dev Why the commitment is to the pair rather than to the settlement calldata: the proposal
 /// travels *inside* the orders' appData, and the settlement calldata contains those orders. Hashing
 /// the calldata would therefore be circular. The pair is enough, because the wrapper derives
-/// everything else from it — exact amounts, both owners, the pair of tokens, and reciprocity — so
-/// no other valid execution of the same pair exists.
+/// everything else from it — exact amounts, both owners, the pair of tokens, and reciprocity — so the
+/// pair is what is committed. What that does *not* establish is the exact bytes: the same pair can be
+/// described by a different settlement encoding, or by different clearing prices that clear the same
+/// way, and the signature says nothing about which. Attribution is therefore to the pair, not to the
+/// payload, and a submission that reverts has no on-chain record tying it to this signature.
 ///
 /// Two deliberate differences from BYOS's routing proposal:
 ///
@@ -84,7 +87,13 @@ library PrivateTradeProposal {
   /// @notice Recover the sub-solver. Returns `address(0)` for a malformed signature.
   function recover(Proposal memory proposal, address verifyingContract) internal view returns (address) {
     if (proposal.signature.length != 65) return address(0);
-    return ECDSA.recover(digest(proposal, verifyingContract), proposal.signature);
+    // A 65-byte blob can still be malformed — an s value in the upper half, a v that is not 27 or 28 —
+    // and `ECDSA.recover` reverts on those rather than answering. This function's contract is to return
+    // `address(0)` for anything it cannot recover, so the caller can report a bad signature instead of
+    // an opaque revert from inside the check.
+    (address signer, ECDSA.RecoverError error) =
+      ECDSA.tryRecover(digest(proposal, verifyingContract), proposal.signature);
+    return error == ECDSA.RecoverError.NoError ? signer : address(0);
   }
 
   /// @notice `true` when the proposal carries no signature, meaning on-chain verification is

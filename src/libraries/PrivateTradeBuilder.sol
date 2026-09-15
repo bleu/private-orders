@@ -62,10 +62,27 @@ library PrivateTradeBuilder {
   /// @dev `price0 / price1 == buyAmount / sellAmount`, so the settlement's own
   /// `executedBuy = ceilDiv(sellAmount * sellPrice, buyPrice)` lands exactly on both agreed
   /// amounts. Chosen as `[buyAmount, sellAmount]`: exact, and no rounding anywhere.
+  /// @notice Clearing prices for the pair: the amounts, reduced to their lowest exact ratio.
+  ///
+  /// GPv2 checks each leg by multiplying an amount by a price, so prices are safe only while those
+  /// products fit in a `uint256`. Handing it the raw amounts overflows for large-denomination offers —
+  /// two legs of `2**128` each panic in the settlement — even though the pair is perfectly reciprocal.
+  /// Dividing both by their greatest common divisor leaves the ratio exact and makes the products as
+  /// small as they can be, which is `[1, 1]` when the amounts are equal.
   function clearingPrices(PrivateTradeTerms memory terms) internal pure returns (uint256[] memory prices) {
+    uint256 sell = terms.offer.sellAmount;
+    uint256 buy = terms.offer.buyAmount;
+    uint256 divisor = _gcd(sell, buy);
     prices = new uint256[](2);
-    prices[0] = terms.offer.buyAmount;
-    prices[1] = terms.offer.sellAmount;
+    prices[0] = divisor == 0 ? buy : buy / divisor;
+    prices[1] = divisor == 0 ? sell : sell / divisor;
+  }
+
+  function _gcd(uint256 a, uint256 b) private pure returns (uint256) {
+    while (b != 0) {
+      (a, b) = (b, a % b);
+    }
+    return a;
   }
 
   /// @notice The ComposableCoW payload a Shed-owned order validates against:
