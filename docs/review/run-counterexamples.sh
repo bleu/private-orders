@@ -17,7 +17,9 @@ node "$ROOT/scripts/check-page.mjs"
 
 REVIEW_DIR="$(mktemp -d "${TMPDIR:-/tmp}/private-trade-review.XXXXXX")"
 trap 'rm -rf "$REVIEW_DIR"' EXIT
-cp -R "$ROOT/src" "$ROOT/test" "$REVIEW_DIR/"
+# `script` too: a library the tests use lives there, and a missing source is a compile error rather
+# than a skipped test.
+cp -R "$ROOT/src" "$ROOT/test" "$ROOT/script" "$REVIEW_DIR/"
 cp "$ROOT/foundry.toml" "$REVIEW_DIR/foundry.toml"
 ln -s "$ROOT/lib" "$REVIEW_DIR/lib"
 cp "$ROOT/docs/review/ReviewCounterexamples.t.sol" "$REVIEW_DIR/test/ReviewCounterexamples.t.sol"

@@ -49,8 +49,8 @@ live mainnet state for release `private-trade.v1`:
 ```
 wrapper    0x518ee95490fbd36D221BBaC8E3839AF3c1365B93
 handler    0x6bE0461981Fa53828547cFD7A1ca998C24f3a8C9
-submitter  0xe833E42Ad12bF2c72Ee4B761Ca020F638EF28AE5
-authoriser 0x46724A7550549C4Df246819F6D4Eb4a22AF9600B
+submitter  0xD8e89038b3b7ad07E16D855384E22A54B519a54f
+authoriser 0xd449F8F37802959d6369Fd701A9A88f5931588a5
 ```
 
 These move whenever the wrapper's bytecode changes, because the handler's init code embeds the

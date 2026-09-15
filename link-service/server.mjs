@@ -131,6 +131,22 @@ function serialize(id, run) {
   return next;
 }
 
+/// Change one offer record and write it back, re-reading it first.
+///
+/// Every write in a route that awaited something must go through this. The object loaded when the
+/// request arrived is a snapshot, and another request may have written since — a signature submitted
+/// while an acceptance waited on the orderbook was restored away by the acceptance's own save. The
+/// re-read and the write are in the same synchronous block, so nothing can intervene between them.
+function saveFresh(id, change, fallback) {
+  const fresh = loadOffer(id) ?? fallback;
+  change(fresh);
+  saveOffer(fresh);
+  // The caller's snapshot is brought up to date with what is now stored, so the rest of the route can
+  // keep reading the record it already has without loading it again.
+  if (fresh !== fallback) Object.assign(fallback, fresh);
+  return fresh;
+}
+
 /// Record one party's signature on an offer.
 ///
 /// The load-bearing part is the re-read immediately before the write: `offer` was loaded when the
@@ -214,9 +230,24 @@ function cast(args) {
 /// an account holding a key, and a contract account answers a signature check over ERC-1271 instead of
 /// recovering to an address. A party's owner never changes kind, so one read is enough.
 const codeCache = new Map();
-function hasCode(address) {
-  const key = String(address ?? '').toLowerCase();
-  if (!key) return false;
+/// Set for the length of one synchronous run of the pre-signing checks.
+///
+/// Repeated reads can disagree: an RPC call that fails and the next that answers classified the same
+/// owner two ways inside one request, and a run that mixes the two classifications can accept a
+/// signature the other classification would have refused. Within a run the answer is asked once.
+let codeRun = null;
+
+function withOneCodeAnswer(run) {
+  codeRun = new Map();
+  try {
+    return run();
+  } finally {
+    codeRun = null;
+  }
+}
+
+function readCode(address) {
+  const key = String(address).toLowerCase();
   if (codeCache.has(key)) return codeCache.get(key);
   try {
     const value = cast(['code', address, '--rpc-url', RPC]).trim() !== '0x';
@@ -225,10 +256,20 @@ function hasCode(address) {
   } catch {
     // A failed read is not a fact about the account, so it is not remembered. This call answers
     // conservatively — an owner with code is asked over ERC-1271 rather than recovered, which is the
-    // safer route — but the next call asks the chain again. Remembering the failure would let one
+    // safer route — but the next run asks the chain again. Remembering the failure would let one
     // unreachable RPC moment route an EOA down the contract path until the process restarted.
     return true;
   }
+}
+
+function hasCode(address) {
+  const key = String(address ?? '').toLowerCase();
+  if (!key) return false;
+  if (codeRun) {
+    if (!codeRun.has(key)) codeRun.set(key, readCode(key));
+    return codeRun.get(key);
+  }
+  return readCode(key);
 }
 
 /// Ask the Solidity builder to derive the whole payload. No private key, no transaction.
@@ -406,7 +447,12 @@ function withdrawPlan(offer, role) {
       env: { ...process.env, WITHDRAW_REQUEST_FILE: requestFile, WITHDRAW_COMPUTED_FILE: computedFile },
     });
     const plan = JSON.parse(fs.readFileSync(computedFile, 'utf8'));
-    return plan.empty ? { empty: true, shed: side.shed } : { ...plan, shed: side.shed, role };
+    if (plan.empty) return { empty: true, shed: side.shed };
+    // A contract owner approves a hash, and the hash for a withdrawal is not the hash for the trade —
+    // approving the trade's message authorises nothing here. The plan is the only place that knows the
+    // withdrawal's digest, so the hash it must approve is computed here and travels with it.
+    const messageHash = hasCode(side.owner) ? ownerMessageHash(side.owner, plan.digest) : null;
+    return { ...plan, shed: side.shed, role, messageHash };
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -466,7 +512,10 @@ function signatureProblem(owner, signature) {
   // length to assume: the Shed itself accepts a one-byte signature from an owner that reads it that
   // way, and a multi-owner Safe produces its owners' signatures concatenated. So ask only that the
   // value is hex and not absurd; the account is what decides, and it is asked.
-  if (hasCode(owner)) return sig.length > 65536 ? 'signature is longer than any ERC-1271 account should return' : null;
+  // No length cap beyond what the request body already enforces (`readBody` refuses more than a
+  // megabyte): the account is what decides what it accepts, and a client-side cap would be the service
+  // having an opinion about a signature shape it has already agreed not to have one about.
+  if (hasCode(owner)) return null;
   return sig.length === 132 ? null : `a signature from ${owner} must be exactly 65 bytes`;
 }
 
@@ -798,6 +847,10 @@ const funding = (computed, role) => {
 /// there. None of them need a signature, which is the point: a dead offer should cost somebody a
 /// sentence, not two wallet prompts and a failed relay.
 function checksBeforeSigning(offer, role) {
+  return withOneCodeAnswer(() => runChecksBeforeSigning(offer, role));
+}
+
+function runChecksBeforeSigning(offer, role) {
   const computed = offer.computed;
   const side = role === 'maker' ? computed.makerBundle : computed.takerBundle;
   const checks = [];
@@ -889,6 +942,11 @@ function checksBeforeSigning(offer, role) {
   // blob. So this is reported, never required. The service's part is to accept whatever the account
   // returns and ask the account whether it is valid.
   if (account.isContract) {
+    // Asked first and on its own. Computing the hash needs only the account's own separator, so an
+    // account that is not a Safe — or one whose multisig getters are missing or unreadable — still
+    // gets the hash it has to approve. Nesting this inside the block below is what made the whole
+    // page flow unavailable to those accounts.
+    account.messageHash = ownerMessageHash(side.owner, side.digest);
     try {
       account.threshold = Number(cast(['call', side.owner, 'getThreshold()(uint256)', '--rpc-url', RPC]).split(' ')[0]);
       const list = cast(['call', side.owner, 'getOwners()(address[])', '--rpc-url', RPC]).replace(/[[\]]/g, '');
@@ -896,8 +954,6 @@ function checksBeforeSigning(offer, role) {
       // A Safe's EIP-712 domain carries its own version, and a signature over a message built with
       // a different one hashes to something it will not accept. The account can be asked.
       account.version = castString(cast(['call', side.owner, 'VERSION()(string)', '--rpc-url', RPC]));
-      // What this account must approve on chain, since it cannot return a signature from a key.
-      account.messageHash = ownerMessageHash(side.owner, side.digest);
       record('this account can be authorised by its own rules', `${account.threshold} of ${account.owners} owners`, true, null);
     } catch {
       record('this account can be authorised by its own rules', 'not a readable multisig', true, null, false);
@@ -925,6 +981,21 @@ const publicTerms = (offer) => {
     expiresAt: new Date(Number(computed.validTo) * 1000).toISOString(),
   };
 };
+
+/// One sentence about what is known to have happened, for a reader deciding whether anything is stuck.
+///
+/// An offer reaches this state in several ways and they mean different things to the party whose
+/// tokens may be in a Shed. Saying "funding succeeded but the order was never placed" is only true for
+/// one of them: a funding phase that stopped halfway published nothing, and a relay that died after
+/// the order was posted may have left it on the book.
+function recoveryReason(offer) {
+  const phase = offer?.acceptance?.phase;
+  if (phase === 'settling' || phase === 'published') return 'The order was placed, so it may still fill.';
+  if (phase === 'failed' || phase === 'funded') {
+    return 'The relay never reported success, so the order may or may not be on the book.';
+  }
+  return 'Funding stopped before the order was placed, so nothing from this offer can fill.';
+}
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -1140,6 +1211,7 @@ const server = http.createServer(async (req, res) => {
           makerSigned: offer.signatures?.maker !== undefined,
           takerSigned: offer.signatures?.taker !== undefined,
           orderUid: offer.orderUid ?? null,
+          recoveryReason: recoveryReason(offer),
         });
       }
 
@@ -1188,8 +1260,9 @@ const server = http.createServer(async (req, res) => {
             },
           );
           fs.rmSync(path.join(OFFERS_DIR, `${offer.id}.json`), { force: true });
-          offer.cancelledAt = new Date().toISOString();
-          saveOffer(offer);
+          saveFresh(offer.id, (fresh) => {
+            fresh.cancelledAt = new Date().toISOString();
+          }, offer);
           return json(res, 200, { status: 'cancelled', relay: out.includes('already') ? 'already relayed' : 'relayed' });
         } catch (err) {
           return json(res, 409, { error: relayReason(String(err.stderr ?? err.message ?? '')) });
@@ -1306,19 +1379,28 @@ const server = http.createServer(async (req, res) => {
         if (body.permitSignature) offer.permits.taker = body.permitSignature;
 
         for (const role of ['maker', 'taker']) {
-          if (funding(offer.computed, role).mode === 'permit' && !offer.permits[role]) {
+          // Same rule as the signature route and the relay: a permit is only needed when the allowance
+          // is not already there. Requiring it by funding mode alone refused an acceptance whose maker
+          // had signed without one — with a standing approval, which the relay would then have skipped.
+          const side_ = role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
+          const permitCovered = funding(offer.computed, role).mode !== 'permit'
+            || BigInt(allowanceOf(side_.sellToken, side_.owner, side_.shed)) >= BigInt(side_.sellAmount);
+          if (!permitCovered && !offer.permits[role]) {
             return json(res, 400, {
-              error: `the ${role}'s side is funded by a permit, so its permitSignature is required`,
+              error: `the ${role}'s side is funded by a permit and has no allowance yet, so its permitSignature is required`,
               permitKind: offer.computed[role === 'maker' ? 'makerBundle' : 'takerBundle'].permitKind,
               funding: funding(offer.computed, role),
             });
           }
         }
 
-        offer.acceptance ??= { attemptId: crypto.randomUUID(), startedAt: new Date().toISOString() };
-        offer.acceptance.phase = 'funding';
-        delete offer.acceptance.error;
-        saveOffer(offer);
+        saveFresh(offer.id, (fresh) => {
+          fresh.signatures.taker = signature;
+          if (body.permitSignature) fresh.permits.taker = body.permitSignature;
+          fresh.acceptance ??= { attemptId: crypto.randomUUID(), startedAt: new Date().toISOString() };
+          fresh.acceptance.phase = 'funding';
+          delete fresh.acceptance.error;
+        }, offer);
 
         // Taken here, immediately before the work, and not a line earlier: every check above can
         // return, and a lock held across a return never comes back — the offer would report "already
@@ -1330,28 +1412,43 @@ const server = http.createServer(async (req, res) => {
             makerPermit: offer.permits.maker,
             takerPermit: offer.permits.taker,
           });
-          offer.acceptance.phase = 'funded';
-          saveOffer(offer);
+          saveFresh(offer.id, (fresh) => {
+            fresh.acceptance ??= {};
+            fresh.acceptance.phase = 'funded';
+          }, offer);
 
           // Publish atomically so the sub-solver never observes a partial plan.
           const target = path.join(OFFERS_DIR, `${offer.id}.json`);
           const temporary = `${target}.${offer.acceptance.attemptId}.tmp`;
           fs.writeFileSync(temporary, JSON.stringify(offer.computed, null, 2));
           fs.renameSync(temporary, target);
-          offer.acceptance.phase = 'published';
-          saveOffer(offer);
+          saveFresh(offer.id, (fresh) => {
+            fresh.acceptance ??= {};
+            fresh.acceptance.phase = 'published';
+          }, offer);
 
-          offer.orderUid = await postOrder(offer.computed.takerOrder);
-          offer.acceptedAt = new Date().toISOString();
-          offer.acceptance.phase = 'settling';
-          saveOffer(offer);
+          const orderUid = await postOrder(offer.computed.takerOrder);
+          const settledRecord = saveFresh(offer.id, (fresh) => {
+            fresh.orderUid = orderUid;
+            fresh.acceptedAt = new Date().toISOString();
+            fresh.acceptance ??= {};
+            fresh.acceptance.phase = 'settling';
+          }, offer);
 
-          return json(res, 202, { id: offer.id, orderUid: offer.orderUid, status: 'settling', relay: relayLog });
+          return json(res, 202, {
+            id: settledRecord.id,
+            orderUid,
+            status: 'settling',
+            relay: relayLog,
+          });
         } catch (err) {
-          offer.acceptance.phase = 'failed';
-          offer.acceptance.error = relayReason(String(err.stderr ?? err.message ?? ''));
-          saveOffer(offer);
-          return json(res, 502, { status: 'recovery_available', error: offer.acceptance.error });
+          const reason = relayReason(String(err.stderr ?? err.message ?? ''));
+          saveFresh(offer.id, (fresh) => {
+            fresh.acceptance ??= {};
+            fresh.acceptance.phase = 'failed';
+            fresh.acceptance.error = reason;
+          }, offer);
+          return json(res, 502, { status: 'recovery_available', error: reason });
         } finally {
           accepting.delete(offer.id);
         }

@@ -307,7 +307,7 @@ function appendShedContents(app, reason) {
         throw new Error('The active account in your wallet is ' + (active ? short(active) : 'not set') +
           ', but this trade is with ' + short(account) + '.');
       }
-      const signature = await signDigest(plan.typedData, plan.digest);
+      const signature = await signDigest(plan.typedData, plan.digest, plan.messageHash);
       await post('/offers/' + id + '/withdraw', { address: account, signature });
       moved = true;
       await loadRole();
@@ -316,6 +316,16 @@ function appendShedContents(app, reason) {
       render();
     }
   };
+  if (me.owner && me.owner.isContract) {
+    // The account cannot return a signature from a key, so the reader needs the exact hash to approve
+    // before the button will do anything. A Safe does this with "Sign message".
+    const hash = plan.messageHash || null;
+    app.append(frag('<div class="note">This account approves a message hash rather than signing. ' +
+      (hash
+        ? 'Approve <span class="addr">' + esc(hash) + '</span> in it — a Safe does this with Sign message — then press the button.'
+        : 'Its hash could not be read from the chain, so it cannot be asked yet.') +
+      '</div>'));
+  }
   app.append(move);
 }
 
@@ -413,7 +423,8 @@ function render() {
     app.append(frag('<h2>' + (offer.status === 'expired' ? 'Expired' : 'Needs recovery') + '</h2>'));
     app.append(frag('<div class="note">' + (offer.status === 'expired'
       ? 'This offer passed its deadline, so no order from it can fill and nothing more will happen on its own.'
-      : 'Funding succeeded, but the order was never placed.' + (offer.error ? ' ' + esc(offer.error) : '')) +
+      : (offer.recoveryReason || 'The order was never placed, so nothing from this offer can fill.') +
+        (offer.error ? ' ' + esc(offer.error) : '')) +
       '</div>'));
     appendShedContents(app, 'what was funded for it');
   }
@@ -463,7 +474,7 @@ function render() {
   // halfway through. A permit is two signatures; an approval is a transaction and then a signature.
   // A permit the Shed has already been granted does not need signing again, so the wallet is asked
   // once rather than twice. The relay skips a permit whose allowance is in place, and so does this.
-  const permitNeeded = !approving && !covered;
+  const permitNeeded = !approving && !approved;
   const prompts = approving
     ? 'a transaction, then a signature'
     : permitNeeded ? 'two signatures' : 'one signature';
@@ -708,9 +719,11 @@ function signTyped(typedData) {
 /// So this does not build a message. The service computed the hash the account must approve, from the
 /// account's own domain separator; the page shows it, the account approves it, and the empty signature
 /// below is how an account that has approved a hash answers its own ERC-1271 check.
-function signDigest(typedData, digest) {
+function signDigest(typedData, digest, messageHash) {
   if (!(me.owner && me.owner.isContract)) return signTyped(typedData);
-  const approved = (me.ready && me.ready.account && me.ready.account.messageHash) || null;
+  // The hash that has to be approved belongs to the message being authorised. The account's readiness
+  // carries the trade's hash; a withdrawal has its own, and it travels with the withdrawal plan.
+  const approved = messageHash || (me.ready && me.ready.account && me.ready.account.messageHash) || null;
   if (!approved) {
     throw new Error('this account approves a hash instead of signing, and its hash could not be read from the chain');
   }
@@ -718,6 +731,7 @@ function signDigest(typedData, digest) {
 }
 
 function poll() {
+  let lastStatus = offer.status;
   // One failed request used to end the loop silently, which is indistinguishable from a trade that
   // never settles. Keep polling, and say so if it keeps failing.
   let failures = 0;
@@ -726,10 +740,16 @@ function poll() {
       const s = await get('/offers/' + id + '/status');
       failures = 0;
       document.getElementById('status').textContent = s.status;
-      if (s.status === 'settled') {
-        clearInterval(timer);
-        await load();
-        return;
+      // Something that changes what the reader can do needs the controls redrawn, not only the label.
+      // An offer that expires while they are watching used to keep polling a page that still showed the
+      // signing controls and said nothing about moving the tokens back.
+      if (s.status !== lastStatus) {
+        lastStatus = s.status;
+        if (['settled', 'expired', 'cancelled', 'recovery_available'].indexOf(s.status) !== -1) {
+          clearInterval(timer);
+          await load();
+          return;
+        }
       }
       const note = document.getElementById('waiting');
       if (note) note.textContent = 'Waiting for a solver to settle this. Usually under a minute.';

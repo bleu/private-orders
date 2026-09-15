@@ -155,9 +155,32 @@ library ShedBundle {
     });
   }
 
+  /// @dev The version is read from the Shed, not from the factory's current implementation. A proxy can
+  /// be pointed at a new implementation, and then the version the Shed executes with is the one that
+  /// frames its digests — while the factory still reports the old one. Reading it from the contract that
+  /// will do the verifying is the only answer that stays right across an upgrade.
   function domainSeparator(address shedFactory, address shed) internal view returns (bytes32) {
-    bytes32 version = keccak256(bytes(IShedVersion(COWShedFactory(shedFactory).implementation()).VERSION()));
-    return keccak256(abi.encode(EIP712_DOMAIN_TYPE_HASH, keccak256("COWShed"), version, block.chainid, shed));
+    return keccak256(
+      abi.encode(EIP712_DOMAIN_TYPE_HASH, keccak256("COWShed"), _version(shedFactory, shed), block.chainid, shed)
+    );
+  }
+
+  /// @dev The version that frames the Shed's digests, asked of the Shed first.
+  ///
+  /// A Shed is a proxy. If it is ever pointed at a new implementation, the version it executes with is
+  /// the one its digests use, while the factory still reports the implementation it deployed with — so
+  /// reading the factory alone would compute a separator the Shed does not recognise. The factory is
+  /// the fallback for a Shed that cannot answer for itself.
+  function _version(address shedFactory, address shed) private view returns (bytes32) {
+    // The code check comes first: `try` catches a revert from the callee, but not an ABI decoding
+    // failure, and a call to an address with no code returns nothing to decode. Asking an address that
+    // holds no Shed is a question with no answer, not an error to catch.
+    if (shed.code.length > 0) {
+      try IShedVersion(shed).VERSION() returns (string memory version) {
+        return keccak256(bytes(version));
+      } catch {}
+    }
+    return keccak256(bytes(IShedVersion(COWShedFactory(shedFactory).implementation()).VERSION()));
   }
 
   /// @notice The domain fields as typed data would carry them, for a client that needs to display

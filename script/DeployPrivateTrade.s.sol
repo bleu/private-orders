@@ -58,10 +58,38 @@ contract DeployPrivateTrade is Script {
 
     vm.startBroadcast(deployerPrivateKey);
 
-    PrivateTradeWrapper wrapper = new PrivateTradeWrapper{salt: salt}(ICowSettlement(settlement));
-    PrivateTradeOrder handler = new PrivateTradeOrder{salt: salt}(wrapper);
-    PrivateTradeSubmitter submitter = new PrivateTradeSubmitter{salt: salt}();
-    PrivateTradeAuthoriser authoriser = new PrivateTradeAuthoriser{salt: salt}();
+    // Deploy only what is missing. The addresses are a function of the init code, so a contract that is
+    // already at its predicted address is the exact contract this script would deploy — deploying it
+    // again collides rather than replacing it. This is what makes the script re-runnable against a
+    // chain that already carries a release: a change to one contract's code moves only that contract's
+    // address, and the others are reused instead of blocking the run.
+    PrivateTradeWrapper wrapper;
+    if (expected.wrapper.code.length > 0) {
+      wrapper = PrivateTradeWrapper(expected.wrapper);
+    } else {
+      wrapper = new PrivateTradeWrapper{salt: salt}(ICowSettlement(settlement));
+    }
+
+    PrivateTradeOrder handler;
+    if (expected.handler.code.length > 0) {
+      handler = PrivateTradeOrder(expected.handler);
+    } else {
+      handler = new PrivateTradeOrder{salt: salt}(wrapper);
+    }
+
+    PrivateTradeSubmitter submitter;
+    if (expected.submitter.code.length > 0) {
+      submitter = PrivateTradeSubmitter(expected.submitter);
+    } else {
+      submitter = new PrivateTradeSubmitter{salt: salt}();
+    }
+
+    PrivateTradeAuthoriser authoriser;
+    if (expected.authoriser.code.length > 0) {
+      authoriser = PrivateTradeAuthoriser(expected.authoriser);
+    } else {
+      authoriser = new PrivateTradeAuthoriser{salt: salt}();
+    }
 
     vm.stopBroadcast();
 

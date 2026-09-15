@@ -18,6 +18,15 @@ const statusContext = {
   wrapperOfferState: () => chainState,
   transactionReceipt: () => receiptResult,
   receiptSucceeded: (receipt) => receipt?.status === '0x1',
+  // `status` remembers a settlement once it has seen one, so the extraction needs the same write path
+  // the service uses. Each call runs immediately and the record is kept in memory, which is what the
+  // assertions below read.
+  stored: null,
+  loadOffer: () => statusContext.stored,
+  saveOffer: (offer) => {
+    statusContext.stored = offer;
+  },
+  serialize: (_id, run) => run(),
 };
 vm.createContext(statusContext);
 vm.runInContext(statusFn + '\nthis.run = status;', statusContext);

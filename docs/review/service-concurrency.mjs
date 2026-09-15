@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { chainState, loadService } from './service-harness.mjs';
+import { signatureOver } from './fixtures.mjs';
 
 const OWNER = (n) => `0x${String(n).repeat(40)}`;
 const SHED = (n) => `0x${String(n + 2).repeat(40)}`;
@@ -49,6 +50,14 @@ function makeRoot() {
       offerId: `0x${'3'.repeat(64)}`,
       validTo: Math.floor(Date.now() / 1000) + 3600,
       maker: OWNER(1),
+      makerCancellation: {
+        owner: OWNER(1),
+        shed: SHED(1),
+        nonce: `0x${'9'.repeat(64)}`,
+        deadline: Math.floor(Date.now() / 1000) + 3600,
+        bundleTypedData: { marker: 'c'.repeat(64) },
+        digest: `0x${'8'.repeat(64)}`,
+      },
       makerBundle: side(1),
       takerBundle: side(2),
       takerOrder: {},
@@ -95,6 +104,58 @@ test('two parties signing at once both keep their signature', async () => {
     Object.keys(record(root).signatures).sort(),
     ['maker', 'taker'],
     'one party was told its signature was saved and the other request wrote it away',
+  );
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+// The signature route was the first writer found to lose an update. It was not the only one: the
+// cancellation and acceptance routes each waited for a request body (and, for acceptance, for the
+// orderbook) and then saved the snapshot they had loaded when the request arrived. Both are
+// reachable in the ordinary two-tab flow this design creates — one party signs while the other
+// cancels or accepts — so both are checked here, not just repaired in the source.
+
+test('a cancellation that overlaps a signature does not write the signature away', async () => {
+  const { root, service } = await fixture();
+  const offer = record(root);
+  const maker = await service.open('POST', '/offers/offer/signature');
+  const cancel = await service.open('POST', '/offers/offer/cancel');
+
+  const signed = await maker.deliver({ role: 'maker', signature: SIG });
+  const cancelled = await cancel.deliver({
+    address: OWNER(1),
+    signature: signatureOver(offer.computed.makerCancellation.bundleTypedData),
+  });
+
+  assert.equal(signed.status, 200, JSON.stringify(signed.body));
+  assert.equal(cancelled.status, 200, JSON.stringify(cancelled.body));
+  assert.equal(
+    record(root).signatures.maker,
+    SIG,
+    'the cancellation was relayed but its save erased a signature that had already been accepted',
+  );
+  assert.ok(record(root).cancelledAt, 'the cancellation was not recorded');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('an acceptance that overlaps a signature does not restore the older record', async () => {
+  const { root, service } = await fixture({ withdrawPlan: 'held' });
+  const taker = await service.open('POST', '/offers/offer/accept');
+  const maker = await service.open('POST', '/offers/offer/signature');
+
+  const signed = await maker.deliver({ role: 'maker', signature: SIG });
+  const accepted = await taker.deliver({ address: OWNER(2), signature: SIG });
+
+  assert.equal(signed.status, 200, JSON.stringify(signed.body));
+  assert.ok(accepted.status < 300 || accepted.status === 502, JSON.stringify(accepted.body));
+  const stored = record(root);
+  assert.equal(
+    stored.signatures.maker,
+    SIG,
+    'the acceptance saved the record it loaded before posting the order, losing a signature written since',
+  );
+  assert.ok(
+    stored.withdrawals?.maker,
+    'the acceptance saved the record it loaded before posting the order, losing a withdrawal plan written since',
   );
   fs.rmSync(root, { recursive: true, force: true });
 });

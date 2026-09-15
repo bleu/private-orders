@@ -28,6 +28,9 @@ import {GPv2TradeEncoder} from "../vendor/GPv2TradeEncoder.sol";
 /// A submitter therefore cannot forge a trade. It can only assemble the pair the parties agreed to,
 /// and the wrapper plus the order handlers reject anything else on-chain.
 library PrivateTradeBuilder {
+  /// @dev Thrown when no exact integer price pair exists that the settlement's arithmetic can hold.
+  error PrivateTrade_AmountsTooLargeForExactPrices(uint256 sellAmount, uint256 buyAmount);
+
   /// @notice Both conditional orders for a pair.
   /// @param maker `abi.encode(PrivateTradeRole.Maker, terms)`
   /// @param taker `abi.encode(PrivateTradeRole.Taker, terms)`

@@ -106,7 +106,7 @@ contract PrivateTradeDeployTest is Test {
   }
 
   function _pinnedSubmitter() internal pure returns (address) {
-    return 0x897bA1d0020517Cb7a08FFAE1504DA880828699C;
+    return 0xD8e89038b3b7ad07E16D855384E22A54B519a54f;
   }
 
   function _pinnedAuthoriser() internal pure returns (address) {
