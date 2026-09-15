@@ -27,6 +27,7 @@ import {
   PrivateTrade_BadOffer,
   PrivateTrade_Expired,
   PrivateTrade_InvalidSettleData,
+  PrivateTrade_SettlementDidNotFill,
   PrivateTrade_AppDataMismatch,
   PrivateTrade_ProposalWrongWrapper,
   PrivateTrade_ProposalExpired,
@@ -42,6 +43,13 @@ import {
 } from "./interfaces/IPrivateTrade.sol";
 import {PrivateTradeLib} from "./libraries/PrivateTradeLib.sol";
 import {PrivateTradeProposal} from "./libraries/PrivateTradeProposal.sol";
+
+/// @dev The one read this wrapper makes of the settlement's own bookkeeping. Declared here rather
+/// than added to the vendored `ICowSettlement`, so that file stays re-vendorable from upstream.
+interface IGPv2FilledAmount {
+  /// @notice How much of an order GPv2 has filled, by its order UID.
+  function filledAmount(bytes calldata orderUid) external view returns (uint256);
+}
 
 /// @title PrivateTradeWrapper
 /// @notice A CoW Atomic Bundle. It is the only way a pair of private trade orders can be settled.
@@ -63,10 +71,15 @@ import {PrivateTradeProposal} from "./libraries/PrivateTradeProposal.sol";
 /// The wrapper holds no funds and executes no arbitrary calls.
 contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
   /// @dev Offer being settled, readable by order handlers during the settlement.
-  bytes32 private _activeOfferId;
+  ///
+  /// Transient, because the window is a fact about one transaction: it is opened by `_wrap` and read
+  /// by the order handlers while the settlement runs, and it must not be reachable from any other
+  /// transaction. Persistent storage would leave a value behind that has to be cleared on every path,
+  /// and would write two storage slots in the middle of a settlement.
+  bytes32 private transient _activeOfferId;
 
   /// @dev Counterparty being settled, readable by order handlers during the settlement.
-  address private _activeTaker;
+  address private transient _activeTaker;
 
   /// @dev A maker offer is globally single-use, independent of appData or GPv2 order UID.
   mapping(bytes32 offerId => PrivateTradeOfferState state) private _offerStates;
@@ -127,6 +140,30 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
     // window is the guarantee, so it refuses to be shared.
     if (_activeOfferId != bytes32(0)) revert PrivateTrade_Reentered();
 
+    FillGuard memory guard = _open(settleData, wrapperData);
+
+    _next(settleData, remainingWrapperData);
+
+    _close(guard);
+  }
+
+  /// @dev What `_wrap` reads before the settlement and checks after it.
+  struct FillGuard {
+    bytes32 offerId;
+    bytes makerUid;
+    bytes takerUid;
+    uint256 makerFilledBefore;
+    uint256 takerFilledBefore;
+  }
+
+  /// @dev Everything that has to be true, and everything that has to be recorded, before the settlement
+  /// runs: the payload against the terms, the terms against the offer, the orders, the offer's own
+  /// state, and the context the order handlers read while it executes.
+  ///
+  /// Split out of `_wrap` because `_wrap` does not have the stack for it, and because the two halves
+  /// are the honest description of what happens: the window opens, the settlement runs, the window
+  /// closes and the claim is checked.
+  function _open(bytes calldata settleData, bytes calldata wrapperData) private returns (FillGuard memory guard) {
     (bytes32 declaredOfferId, PrivateTradeTerms memory terms, PrivateTradeProposal.Proposal memory proposal) =
       abi.decode(wrapperData, (bytes32, PrivateTradeTerms, PrivateTradeProposal.Proposal));
     bytes32 offerId_ = _validateTerms(declaredOfferId, terms);
@@ -141,6 +178,12 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
 
     _validateSettlement(tokens, clearingPrices, trades, interactions, terms);
 
+    // Read before the settlement runs, so that afterwards we can tell "the settlement succeeded" from
+    // "the trade happened".
+    (guard.makerUid, guard.takerUid) = _orderUids(tokens, trades, terms);
+    guard.makerFilledBefore = _filled(guard.makerUid);
+    guard.takerFilledBefore = _filled(guard.takerUid);
+
     PrivateTradeOfferState state = _offerStates[offerId_];
     if (state == PrivateTradeOfferState.Consumed) {
       revert PrivateTrade_OfferConsumed(offerId_);
@@ -153,11 +196,30 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
 
     _activeOfferId = offerId_;
     _activeTaker = terms.taker;
+    guard.offerId = offerId_;
+  }
 
-    _next(settleData, remainingWrapperData);
-
+  /// @dev The window closes, and the claim is checked. Returning from the settlement means the calldata
+  /// was accepted; it does not by itself mean a fill was recorded. Validating the calldata proves the
+  /// orders were the right ones and were priced reciprocally — `filledAmount` is the settlement's own
+  /// record of what it moved. A bundle that returns without delivering is exactly what the framework
+  /// documentation warns about, and it deserves its own error rather than being inferred.
+  function _close(FillGuard memory guard) private {
     _activeOfferId = bytes32(0);
     _activeTaker = address(0);
+
+    if (_filled(guard.makerUid) <= guard.makerFilledBefore) {
+      revert PrivateTrade_SettlementDidNotFill(0, guard.offerId);
+    }
+    if (_filled(guard.takerUid) <= guard.takerFilledBefore) {
+      revert PrivateTrade_SettlementDidNotFill(1, guard.offerId);
+    }
+  }
+
+  /// @dev What GPv2 has filled of an order, by its own identifier. Declared here rather than added to
+  /// the vendored `ICowSettlement`, so that file stays re-vendorable from upstream.
+  function _filled(bytes memory orderUid) private view returns (uint256) {
+    return IGPv2FilledAmount(address(SETTLEMENT)).filledAmount(orderUid);
   }
 
   // --- validation
@@ -319,6 +381,27 @@ contract PrivateTradeWrapper is CowWrapper, IPrivateTradeWrapper {
         clearingPrices[trades[1].buyTokenIndex]
       )) {
       revert PrivateTrade_NotReciprocal();
+    }
+  }
+
+  /// @dev The identifiers the settlement records fills against: the EIP-712 order hash, its owner and
+  /// its expiry, exactly as GPv2 builds an order UID. Taken from the trades themselves, which
+  /// `_validateSettlement` has already required to equal the orders the terms imply.
+  ///
+  /// Separate from `_validateSettlement` because neither function has room for the other's locals.
+  function _orderUids(IERC20[] memory tokens, GPv2Trade.Data[] memory trades, PrivateTradeTerms memory terms)
+    private
+    view
+    returns (bytes memory makerUid, bytes memory takerUid)
+  {
+    bytes32 domainSeparator = SETTLEMENT.domainSeparator();
+    address[2] memory owners = [terms.offer.maker, terms.taker];
+    for (uint256 i = 0; i < 2; ++i) {
+      GPv2Order.Data memory order;
+      _extractOrder(trades[i], tokens, order);
+      bytes memory uid = abi.encodePacked(GPv2Order.hash(order, domainSeparator), owners[i], order.validTo);
+      if (i == 0) makerUid = uid;
+      else takerUid = uid;
     }
   }
 }

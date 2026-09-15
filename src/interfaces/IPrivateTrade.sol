@@ -93,6 +93,12 @@ error PrivateTrade_NoActiveTrade();
 /// @dev Raised when an order is validated during a settlement for a different offer.
 error PrivateTrade_WrongActiveOffer(bytes32 expected, bytes32 actual);
 
+/// @dev Raised when the settlement returned successfully without recording a fill for one leg.
+/// @dev Validating the calldata proves the orders were the right ones; this proves the settlement
+/// acted on them. A bundle that returns without delivering is the failure the framework documentation
+/// warns about, and it deserves an error of its own rather than being inferred from balances.
+error PrivateTrade_SettlementDidNotFill(uint256 leg, bytes32 offerId);
+
 /// @dev Raised when an order is validated during a settlement for a different counterparty.
 error PrivateTrade_WrongActiveTaker(address expected, address actual);
 

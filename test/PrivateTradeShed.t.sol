@@ -216,6 +216,43 @@ contract PrivateTradeShedTest is PrivateTradeTestBase {
     wrapper.wrappedSettle(_settleData(terms, makerParams, takerParams), _chainedWrapperData(terms));
   }
 
+  /// @dev A standing allowance removes the approve from the trade bundle. What the party signs is
+  /// then only the authorisation of the order, and the allowance is a separate decision it made in
+  /// its own transaction — which is also why the signature a wallet shows is one call instead of two.
+  function test_standingAllowanceNeedsNoApproveInTheBundle() public {
+    PrivateTradeTerms memory terms = _termsFull(aliceShed, bobShed, bobShed, aliceEoa, bobEoa);
+    IConditionalOrder.ConditionalOrderParams memory makerParams = _params(PrivateTradeRole.Maker, terms, "maker");
+    IConditionalOrder.ConditionalOrderParams memory takerParams = _params(PrivateTradeRole.Taker, terms, "taker");
+
+    usdc.mint(aliceShed, USDC_AMOUNT);
+    wbtc.mint(bobShed, WBTC_AMOUNT);
+
+    // Alice allows the relayer once, on its own terms.
+    _relayBundleWithNonce(
+      aliceEoa,
+      alicePk,
+      aliceShed,
+      ShedBundle.approvalOnly(address(usdc), relayer, type(uint256).max),
+      keccak256("standing-approval")
+    );
+    assertEq(usdc.allowance(aliceShed, relayer), type(uint256).max, "standing allowance not set");
+
+    // The trade bundle carries the authorisation only: nothing to approve, one call to sign.
+    Call[] memory authorisation = ShedBundle.authorisationOnly(address(authoriser), address(cow), makerParams);
+    assertEq(authorisation.length, 1, "expected a single call");
+    _relayBundleWithNonce(aliceEoa, alicePk, aliceShed, authorisation, keccak256("authorise-only"));
+
+    _relayBundle(bobEoa, bobPk, bobShed, _bundle(address(wbtc), WBTC_AMOUNT, takerParams));
+
+    assertTrue(cow.singleOrders(aliceShed, cow.hash(makerParams)), "order not authorised without an approve");
+
+    vm.prank(solver);
+    wrapper.wrappedSettle(_settleData(terms, makerParams, takerParams), _chainedWrapperData(terms));
+
+    assertEq(wbtc.balanceOf(aliceEoa), WBTC_AMOUNT, "alice was not paid");
+    assertEq(usdc.balanceOf(bobEoa), USDC_AMOUNT, "bob was not paid");
+  }
+
   // --- bundles
 
   /// @dev Exactly the two calls a Shed must make for a private trade: approve, then authorise.

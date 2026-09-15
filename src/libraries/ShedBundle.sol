@@ -68,6 +68,44 @@ library ShedBundle {
     });
   }
 
+  /// @notice The one call a party needs when the vault relayer already has an allowance: authorise
+  /// the order, nothing else.
+  ///
+  /// @dev Whether the allowance is in place is a chain read, so the decision to send this instead of
+  /// `calls` belongs to whoever builds the bundle. Two reasons to prefer it: a repeat approve is a
+  /// storage write, and — more to the point — an approval inside the calldata the party signs makes
+  /// the signature authorise a token allowance as well as an order. A standing allowance is its own
+  /// deliberate, revocable act (`approvalOnly`), and the trade signature then only authorises the
+  /// trade. The spender is the canonical vault relayer, which can only move a token as part of a
+  /// settlement whose order that owner authorised, so the standing exposure is the same set of
+  /// orders either way.
+  function authorisationOnly(
+    address authoriser,
+    address composableCoW,
+    IConditionalOrder.ConditionalOrderParams memory params
+  ) internal pure returns (Call[] memory result) {
+    result = new Call[](1);
+    result[0] = createCall(authoriser, composableCoW, params);
+  }
+
+  /// @notice The one call that establishes or changes a standing allowance to the vault relayer.
+  /// @dev `amount` is the party's choice: `type(uint256).max` for a one-time approval, or a cap that
+  /// covers expected volume. Revoking is the same call with `0`.
+  function approvalOnly(address sellToken, address vaultRelayer, uint256 amount)
+    internal
+    pure
+    returns (Call[] memory result)
+  {
+    result = new Call[](1);
+    result[0] = Call({
+      target: sellToken,
+      value: 0,
+      callData: abi.encodeCall(IERC20.approve, (vaultRelayer, amount)),
+      allowFailure: false,
+      isDelegateCall: false
+    });
+  }
+
   /// @notice The two calls a private trade party signs: approve the vault relayer, authorise the
   /// conditional order.
   function calls(

@@ -76,6 +76,31 @@ wrapper checks that the two trades really are mirrors, and each handler checks t
 or a different `salt`, or a different amount — produces a different `activeOfferId` and the maker's
 order stops validating.
 
+## The window, and the proof it was used
+
+The pair binding needs a fact that is true only while the settlement is executing: `activeOfferId` and
+`activeTaker`, which the order handlers read to refuse an order that does not belong to the pair being
+settled. It lives in **transient** storage, so it cannot outlive the transaction that set it.
+
+That is a statement about failure modes, not about gas — it costs about 3,000 more gas in a settlement
+of 1.1M. With persistent storage, a later edit that returned early between opening the window and
+closing it would leave the window open **forever**: every subsequent settlement would revert on the
+reentrancy guard and the wrapper would be dead until redeployed. Transient storage cannot leak that way.
+An impossible failure mode for 0.3% of a settlement is the trade.
+
+Validating the settlement's calldata — before it runs — is what proves the orders are the right ones and
+are priced reciprocally. What it does not prove is that a fill was recorded, and a bundle that returns
+without delivering is exactly what the Atomic Bundle documentation warns about. So the wrapper reads
+`filledAmount` for both legs before the settlement and requires it to have increased after: the
+settlement's own record of what it moved, rather than an inference from the calldata being accepted.
+The identifier is derived from the orders the settlement is about to execute, and getting it wrong is
+not a silent failure — `filledAmount` reads zero for an order the settlement never saw, so every
+settlement test would revert.
+
+`_wrap` is three statements — refuse to share the window, open it, close it and check — because that is
+the honest shape of what happens. `_open` and `_close` carry the detail, which also keeps each of them
+inside the compiler's stack limit.
+
 ## Exactness, not "at least"
 
 Both legs are fill-or-kill, fee-free, `BALANCE_ERC20` sell orders, and the wrapper requires
