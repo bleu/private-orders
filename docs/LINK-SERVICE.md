@@ -221,6 +221,16 @@ trade's own EIP-712 message and expect the result to be accepted — it asks for
 back is opaque: the service never inspects its shape beyond a length sanity check, and asks the
 account whether it is valid.
 
+**The page supports the approve-a-hash path, not arbitrary blobs.** A contract account that approves a
+*message* — the Safe flow, where the account calls `signMessage` and the hash is recorded in
+`signedMessages` — needs no signature from the page at all: it shows the hash, the party approves it in
+their own tooling, and the trade proceeds with an empty signature. What the page does not have is a
+field for a nonempty custom ERC-1271 blob, so an account whose authorisation is some other scheme (a
+multisig with a bespoke `isValidSignature`, say) can be served by the API and the on-chain helpers but
+cannot complete the browser flow. The hash itself is computed from the account's own
+`domainSeparator()`, so it is right for whichever Safe version the account is, and a withdrawal carries
+its own hash rather than the trade's.
+
 **Collecting the owners is the account's job, not ours.** A 2-of-3 Safe gathers its owners through its
 own tooling — the Safe App, WalletConnect, the Safe SDK — and returns one blob, whose owners' ECDSA
 signatures are concatenated in ascending address order because `Safe.checkSignatures` requires a
@@ -248,6 +258,13 @@ chains. It re-reads the active account immediately before every signature, becau
 with whichever account is selected rather than the one the page connected with.
 
 ## Known gaps
+
+- **An unreadable chain can report `expired` where a settlement is unknown.** Expiry is only decided
+  when the evidence reads back: while an order still looks fulfilled or its wrapper state is consumed,
+  the status waits rather than declaring the offer dead. If the first reading after the deadline fails,
+  the service has nothing to go on and says `expired` — a settled offer is remembered once it has been
+  seen, but an offer that settled during an outage is not. Nothing is lost by this: the tokens are in
+  the Shed and the withdrawal route is independent of the status.
 
 - **A party signs twice.** The bundle and the permit are separate EIP-712 domains (the Shed's and the
   token's), so they cannot be merged into one message. Two signatures and no transaction beats one
