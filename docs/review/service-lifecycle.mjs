@@ -485,6 +485,31 @@ test('an order that can no longer fill is reported expired, not settling', async
   assert.equal(consumed.body.status, 'settling', 'a consumed offer was reported as expired');
 });
 
+test('two parties signing at once both keep their signature', async () => {
+  const root = currentRoot;
+  const offer = await createOffer(port, { sellAmount: '6' });
+  const record = offerRecord(root, offer.id);
+  const bundleSig = (side) => ({
+    signature: signatureOver(side.bundleTypedData),
+    permitSignature: signatureOver(side.permitTypedData),
+  });
+
+  // Fired together, with no await between them. Each request loads the offer, awaits its body, then
+  // writes the whole record back — so a whole-record write from one would silently drop the other,
+  // while both were told 200.
+  const [a, b] = await Promise.all([
+    call(port, 'POST', `/offers/${offer.id}/signature`, { role: 'maker', ...bundleSig(record.computed.makerBundle) }),
+    call(port, 'POST', `/offers/${offer.id}/signature`, { role: 'taker', ...bundleSig(record.computed.takerBundle) }),
+  ]);
+  assert.equal(a.status, 200, JSON.stringify(a.body));
+  assert.equal(b.status, 200, JSON.stringify(b.body));
+  assert.deepEqual(
+    Object.keys(offerRecord(root, offer.id).signatures).sort(),
+    ['maker', 'taker'],
+    'one signature was written away by the other request',
+  );
+});
+
 // --- runner ---------------------------------------------------------------------------------------
 
 async function main() {

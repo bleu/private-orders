@@ -110,6 +110,73 @@ const saveOffer = (offer) => {
   fs.renameSync(temporary, target);
 };
 
+/// Serialize a read-modify-write of one offer's record.
+///
+/// Every mutating route loads the offer, awaits the request body, then writes the whole record back.
+/// Two requests for different roles therefore each write their own snapshot, and the later one silently
+/// drops the earlier signature — while both are told 200. The body is read by the caller before the
+/// lock is taken, so the lock covers the mutation and never network I/O.
+const offerQueues = new Map();
+function serialize(id, run) {
+  const previous = offerQueues.get(id) ?? Promise.resolve();
+  const next = previous.then(run, run);
+  const tail = next.then(
+    () => {},
+    () => {},
+  );
+  offerQueues.set(id, tail);
+  tail.then(() => {
+    if (offerQueues.get(id) === tail) offerQueues.delete(id);
+  });
+  return next;
+}
+
+/// Record one party's signature on an offer.
+///
+/// The load-bearing part is the re-read immediately before the write: `offer` was loaded when the
+/// request arrived, and the body was awaited since, so writing it back would drop whatever another
+/// request stored in between. Reading again in the same synchronous block as the write closes that
+/// window — measured, a concurrent maker and taker submission loses one without it. `serialize` around
+/// the call is the same guarantee made structural, so a later `await` added between the read and the
+/// write cannot reopen it.
+function recordSignature(offer, body) {
+  if (!['maker', 'taker'].includes(body.role)) {
+    return { status: 400, body: { error: 'role must be maker or taker' } };
+  }
+  const side = body.role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
+  const shape = signatureProblem(side.owner, body.signature);
+  if (shape) return { status: 400, body: { error: shape, expectedSigner: side.owner } };
+
+  // Refuse before signing for the reasons that would refuse after it. A signature that cannot lead
+  // anywhere is not a favour, and a wallet prompt is expensive to take back.
+  const ready = checksBeforeSigning(offer, body.role);
+  if (!ready.ok) {
+    return { status: 409, body: { error: 'this offer cannot settle', problems: ready.problems, checks: ready.checks } };
+  }
+
+  const money = funding(offer.computed, body.role);
+  if (money.mode === 'permit' && !/^0x[0-9a-fA-F]{130}$/.test(body.permitSignature ?? '')) {
+    return {
+      status: 400,
+      body: {
+        error: 'this side is funded by a permit, so a permitSignature is required alongside the authorisation',
+        permitKind: side.permitKind,
+        funding: money,
+      },
+    };
+  }
+  const wrong = preflight(offer, body.role, body);
+  if (wrong) return { status: 400, body: wrong };
+
+  const fresh = loadOffer(offer.id) ?? offer;
+  fresh.signatures ??= {};
+  fresh.permits ??= {};
+  fresh.signatures[body.role] = body.signature;
+  if (body.permitSignature) fresh.permits[body.role] = body.permitSignature;
+  saveOffer(fresh);
+  return { status: 200, body: { id: fresh.id, signed: Object.keys(fresh.signatures) } };
+}
+
 function attemptFiles(kind) {
   return fs.mkdtempSync(path.join(STORE, `.${kind}-`));
 }
@@ -1054,6 +1121,10 @@ const server = http.createServer(async (req, res) => {
       const who = (url.searchParams.get('address') ?? '').toLowerCase();
       const role = addressRole(offer, who);
       if (!role) return json(res, 403, { error: 'this link is for a specific wallet' });
+      // No lock and no re-read here, unlike `/signature`: this route has no `await` between loading
+      // the offer and writing it, so it runs to completion inside one turn of the event loop and two
+      // of them cannot interleave. Checked by removing both and watching the interleaving test still
+      // pass.
       const plan = withdrawPlan(offer, role);
       offer.withdrawals ??= {};
       offer.withdrawals[role] = plan;
@@ -1110,30 +1181,8 @@ const server = http.createServer(async (req, res) => {
 
       if (req.method === 'POST' && parts[2] === 'signature') {
         const body = await readBody(req);
-        if (!['maker', 'taker'].includes(body.role)) return json(res, 400, { error: 'role must be maker or taker' });
-        const side = body.role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
-        const shape = signatureProblem(side.owner, body.signature);
-        if (shape) return json(res, 400, { error: shape, expectedSigner: side.owner });
-
-        // Refuse before signing for the reasons that would refuse after it. A signature that cannot
-        // lead anywhere is not a favour, and a wallet prompt is expensive to take back.
-        const ready = checksBeforeSigning(offer, body.role);
-        if (!ready.ok) return json(res, 409, { error: 'this offer cannot settle', problems: ready.problems, checks: ready.checks });
-
-        if (funding(offer.computed, body.role).mode === 'permit' && !/^0x[0-9a-fA-F]{130}$/.test(body.permitSignature ?? '')) {
-          return json(res, 400, {
-            error: `this side is funded by a permit, so a permitSignature is required alongside the authorisation`,
-            permitKind: side.permitKind,
-            funding: funding(offer.computed, body.role),
-          });
-        }
-        const wrong = preflight(offer, body.role, body);
-        if (wrong) return json(res, 400, wrong);
-
-        offer.signatures[body.role] = body.signature;
-        if (body.permitSignature) offer.permits[body.role] = body.permitSignature;
-        saveOffer(offer);
-        return json(res, 200, { id: offer.id, signed: Object.keys(offer.signatures) });
+        const result = await serialize(offer.id, () => recordSignature(loadOffer(offer.id) ?? offer, body));
+        return json(res, result.status, result.body);
       }
 
       if (req.method === 'POST' && parts[2] === 'accept') {

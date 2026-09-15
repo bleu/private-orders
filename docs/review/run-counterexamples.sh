@@ -24,4 +24,6 @@ cp "$ROOT/docs/review/ReviewCounterexamples.t.sol" "$REVIEW_DIR/test/ReviewCount
 forge test --root "$REVIEW_DIR" --match-contract ReviewCounterexamples -vv
 node "$ROOT/docs/review/service-counterexamples.mjs"
 node "$ROOT/docs/review/service-lifecycle.mjs"
+# Two requests in flight at once, which `fetch` cannot produce.
+node "$ROOT/docs/review/service-concurrency.mjs"
 node "$ROOT/docs/review/page-safety.mjs"
