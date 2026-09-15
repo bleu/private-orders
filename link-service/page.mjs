@@ -461,7 +461,12 @@ function render() {
   const ready = me.ready ?? { ok: true, problems: [], checks: [] };
   // How many times the wallet will be asked, said before the first prompt rather than discovered
   // halfway through. A permit is two signatures; an approval is a transaction and then a signature.
-  const prompts = approving ? 'a transaction, then a signature' : 'two signatures';
+  // A permit the Shed has already been granted does not need signing again, so the wallet is asked
+  // once rather than twice. The relay skips a permit whose allowance is in place, and so does this.
+  const permitNeeded = !approving && !covered;
+  const prompts = approving
+    ? 'a transaction, then a signature'
+    : permitNeeded ? 'two signatures' : 'one signature';
 
   // The allowance is stated as what it is. A DAI-style permit carries 'allowed: true' and no amount,
   // so it grants the maximum; calling that "exactly this amount" would be a false claim on a page
@@ -508,7 +513,9 @@ function render() {
   app.append(frag('<div class="note">Your wallet will ask ' + esc(prompts) + '.' +
     (approving
       ? ' The transaction only approves your own Shed; the signature is the trade.'
-      : ' The first prompt only lets your own Shed hold the tokens; the second is the trade itself.') +
+      : permitNeeded
+        ? ' The first prompt only lets your own Shed hold the tokens; the second is the trade itself.'
+        : ' Your Shed already has the allowance, so only the trade itself is left to sign.') +
     ' Nothing you sign costs gas.</div>'));
   app.append(frag('<div class="step' + ((approving ? approved : permitSig) ? ' done' : '') + '"><span class="n">1</span><b>' +
     (approving ? 'Approve your Shed' : 'Allow ' + amount_) + '</b>' +
@@ -595,7 +602,7 @@ function render() {
         }
       }
 
-      if (!approving) {
+      if (permitNeeded) {
         go.textContent = 'Check your wallet…';
         permitSig = await signTyped(me.permit.typedData);
         go.textContent = 'One more signature…';
@@ -606,7 +613,7 @@ function render() {
       // wallet signing with an account other than the one it reported, and the answer names it.
       const accounts = await usable.request({ method: 'eth_accounts' }).catch(() => null);
       const body = { signature: bundleSig, accounts };
-      if (!approving) body.permitSignature = permitSig;
+      if (permitNeeded) body.permitSignature = permitSig;
       if (me.role === 'maker') await post('/offers/' + id + '/signature', { role: 'maker', ...body });
       else await post('/offers/' + id + '/accept', body);
       await load();
@@ -653,7 +660,7 @@ function render() {
     (me.permit.digest ? '<p class="addr">permit digest ' + esc(me.permit.digest) + '</p>' : '') +
     (ready.checks.length
       ? '<p class="addr">checked before signing:<br>' +
-        ready.checks.map((entry) => (entry.ok ? 'ok ' : 'FAILED ') + esc(entry.name) + (entry.detail ? ' (' + esc(entry.detail) + ')' : '')).join('<br>') + '</p>'
+        ready.checks.map((entry) => (entry.ok ? (entry.checked === false ? 'unverified ' : 'ok ') : 'FAILED ') + esc(entry.name) + (entry.detail ? ' (' + esc(entry.detail) + ')' : '')).join('<br>') + '</p>'
       : '') +
     '</details>'));
 }

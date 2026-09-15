@@ -389,6 +389,8 @@ export async function startOrderbook() {
       req.on('end', () => {
         state.posts += 1;
         if (state.rejectOrders) return send(500, { error: 'the orderbook rejected the order' });
+        // The order is already on the book: what was lost was the response to the first attempt.
+        if (state.duplicateUid) return send(400, { error: `order ${state.duplicateUid} already exists` });
         const uid = `0x${crypto.createHash('sha256').update(raw).digest('hex').slice(0, 56)}`;
         state.orders.set(uid, 'open');
         send(201, uid);

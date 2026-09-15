@@ -510,6 +510,88 @@ test('two parties signing at once both keep their signature', async () => {
   );
 });
 
+test('a standing allowance means the permit does not have to be signed again', async () => {
+  const root = currentRoot;
+  const offer = await createOffer(port, { sellAmount: '6' });
+  const side = offerRecord(root, offer.id).computed.makerBundle;
+  setChain(root, { allowances: { [USDC]: { [MAKER]: { [side.shed]: side.sellAmount } } } });
+
+  const view = await call(port, 'GET', `/offers/${offer.id}/role?address=${MAKER}`);
+  assert.equal(view.body.funding.mode, 'permit', 'this test needs a permit-capable side');
+  assert.equal(view.body.allowance, side.sellAmount, 'the fixture did not record the allowance');
+
+  // The authorisation alone. The relay skips a permit whose allowance is already in place, so asking
+  // for the permit again would refuse a party who has done nothing wrong.
+  const accepted = await call(port, 'POST', `/offers/${offer.id}/signature`, {
+    role: 'maker',
+    signature: signatureOver(side.bundleTypedData),
+  });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+
+  // Without an allowance the permit is still required.
+  const second = await createOffer(port, { sellAmount: '7' });
+  const secondSide = offerRecord(root, second.id).computed.makerBundle;
+  const refused = await call(port, 'POST', `/offers/${second.id}/signature`, {
+    role: 'maker',
+    signature: signatureOver(secondSide.bundleTypedData),
+  });
+  assert.equal(refused.status, 400, JSON.stringify(refused.body));
+  assert.match(refused.body.error, /permitSignature is required/);
+});
+
+test('an attempt that stopped is reported as needing recovery, not as current', async () => {
+  const root = currentRoot;
+  const offer = await createOffer(port, { sellAmount: '6' });
+  await signAs(port, offer.id);
+
+  // What a crash or a restart leaves behind: a phase written by an attempt that is no longer running.
+  const record = offerRecord(root, offer.id);
+  record.acceptance = { attemptId: 'gone', startedAt: new Date().toISOString(), phase: 'funding' };
+  fs.writeFileSync(path.join(root, 'out-json', 'link', `${offer.id}.json`), JSON.stringify(record, null, 2));
+
+  const status = await call(port, 'GET', `/offers/${offer.id}/status`);
+  assert.equal(status.body.status, 'recovery_available', JSON.stringify(status.body));
+  assert.match(status.body.error, /stopped without finishing/);
+});
+
+test('a settled trade stays settled when the evidence stops being readable', async () => {
+  const root = currentRoot;
+  const offer = await createOffer(port, { sellAmount: '6' });
+  await signAs(port, offer.id);
+  const taker = await signAs(port, offer.id, 'taker');
+  const accepted = await call(port, 'POST', `/offers/${offer.id}/accept`, taker);
+  const orderUid = accepted.body.orderUid;
+
+  orderbook.state.orders.set(orderUid, 'fulfilled');
+  orderbook.state.trades.set(orderUid, '0xtx');
+  setChain(root, { receipts: { '0xtx': { status: '0x1', blockNumber: '0x10' } }, offerState: { [offer.offerId]: 1 } });
+  assert.equal((await call(port, 'GET', `/offers/${offer.id}/status`)).body.status, 'settled');
+
+  // The orderbook forgets and the wrapper state stops reading. It still happened, and walking a settled
+  // trade back to `settling` is a worse answer than a stale one.
+  orderbook.state.orders.clear();
+  setChain(root, { offerState: {} });
+  const after = await call(port, 'GET', `/offers/${offer.id}/status`);
+  assert.equal(after.body.status, 'settled', 'a settled trade was walked back to settling');
+  assert.equal(after.body.terminal, true);
+});
+
+test('an order already on the book is adopted rather than lost', async () => {
+  const root = currentRoot;
+  const offer = await createOffer(port, { sellAmount: '6' });
+  await signAs(port, offer.id);
+  const taker = await signAs(port, offer.id, 'taker');
+
+  // The first post reached the book and its response was lost, so the retry reports a duplicate. An
+  // order nobody holds the identifier for cannot be waited on, withdrawn around, or cancelled.
+  const uid = `0x${'ab'.repeat(56)}`;
+  orderbook.state.duplicateUid = uid;
+  const accepted = await call(port, 'POST', `/offers/${offer.id}/accept`, taker);
+  assert.equal(accepted.status, 202, JSON.stringify(accepted.body));
+  assert.equal(accepted.body.orderUid, uid, 'the order already on the book was not adopted');
+  assert.equal(offerRecord(root, offer.id).orderUid, uid);
+});
+
 // --- runner ---------------------------------------------------------------------------------------
 
 async function main() {

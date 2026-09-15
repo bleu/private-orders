@@ -155,11 +155,15 @@ function recordSignature(offer, body) {
   }
 
   const money = funding(offer.computed, body.role);
-  if (money.mode === 'permit' && !/^0x[0-9a-fA-F]{130}$/.test(body.permitSignature ?? '')) {
+  // The relay skips a permit whose allowance is already in place, so demanding a signature for it
+  // would refuse a party who has done nothing wrong — with a standing approval, one prompt is enough.
+  const covered = money.mode !== 'permit'
+    || BigInt(allowanceOf(side.sellToken, side.owner, side.shed)) >= BigInt(side.sellAmount);
+  if (!covered && !/^0x[0-9a-fA-F]{130}$/.test(body.permitSignature ?? '')) {
     return {
       status: 400,
       body: {
-        error: 'this side is funded by a permit, so a permitSignature is required alongside the authorisation',
+        error: 'this side is funded by a permit and has no allowance yet, so a permitSignature is required alongside the authorisation',
         permitKind: side.permitKind,
         funding: money,
       },
@@ -532,7 +536,14 @@ async function postOrder(order) {
     body: JSON.stringify(order),
   });
   const text = await res.text();
-  if (!res.ok) throw new Error(`orderbook rejected the order (${res.status}): ${text}`);
+  if (!res.ok) {
+    // A duplicate means the order is already on the book: what was lost was this service's response to
+    // the first attempt, not the order. Adopting the UID it reports is the difference between a
+    // recoverable offer and one stuck in a phase with an order nobody holds the identifier for.
+    const already = text.match(/0x[0-9a-fA-F]{112}/);
+    if ((res.status === 400 || res.status === 409) && already) return already[0];
+    throw new Error(`orderbook rejected the order (${res.status}): ${text}`);
+  }
   return text.replace(/"/g, '');
 }
 
@@ -635,11 +646,39 @@ const allowanceOf = (token, owner, spender) =>
 async function status(offer) {
   const wrapperState = wrapperOfferState(offer.computed?.offerId);
   if (wrapperState === 'cancelled') return { status: 'cancelled', wrapperState };
+
+  // Once settlement has been established it is a fact about the past, not a reading. Re-deriving it
+  // means a later RPC or orderbook failure can walk a settled trade back to `settling`, which is a
+  // worse lie than a stale answer.
+  if (offer.settledAt) {
+    return {
+      status: 'settled',
+      orderUid: offer.orderUid,
+      settlementTx: offer.settlementTx,
+      wrapperState,
+      settledAt: offer.settledAt,
+      terminal: true,
+    };
+  }
+
   if (!offer.orderUid) {
     const expired = Number(offer.computed?.validTo ?? 0) * 1000 < Date.now();
     const phase = offer.acceptance?.phase;
-    const pendingStatus = phase === 'failed' ? 'recovery_available' : phase ? phase : offer.signatures?.maker && offer.signatures?.taker ? 'signed' : 'open';
-    return { status: expired ? 'expired' : pendingStatus, wrapperState, error: phase === 'failed' ? offer.acceptance.error : undefined };
+    // A phase is only *in flight* while a request is running it. Nothing is running one at startup, or
+    // after a crash, so the phase is then the record of an attempt that stopped — and reporting it as
+    // current would hide that the offer needs recovering.
+    const inFlight = ['funding', 'funded', 'published'].includes(phase);
+    const stalled = inFlight && !accepting.has(offer.id);
+    const pendingStatus = phase === 'failed' || stalled
+      ? 'recovery_available'
+      : phase ? phase : offer.signatures?.maker && offer.signatures?.taker ? 'signed' : 'open';
+    return {
+      status: expired ? 'expired' : pendingStatus,
+      wrapperState,
+      error: phase === 'failed'
+        ? offer.acceptance.error
+        : stalled ? `the ${phase} attempt stopped without finishing` : undefined,
+    };
   }
 
   const order = await orderStatus(offer.orderUid);
@@ -653,6 +692,14 @@ async function status(offer) {
   };
 
   if (settled) {
+    // Remembered under the same lock as any other write to this record, so a concurrent signature
+    // submission is not written away by the snapshot.
+    await serialize(offer.id, () => {
+      const fresh = loadOffer(offer.id) ?? offer;
+      fresh.settledAt ??= new Date().toISOString();
+      fresh.settlementTx ??= txHash;
+      saveOffer(fresh);
+    });
     return { status: 'settled', orderUid: offer.orderUid, settlementTx: txHash, wrapperState, evidence };
   }
 
@@ -756,8 +803,11 @@ function checksBeforeSigning(offer, role) {
   const checks = [];
   const problems = [];
   const account = { address: side.owner, isContract: hasCode(side.owner), threshold: null, owners: null, version: null };
-  const record = (name, detail, ok, problem) => {
-    checks.push({ name, detail, ok });
+  // `checked: false` means the fact could not be read. It is not a problem — an unreachable chain is
+  // not evidence that anything is wrong, and blocking a working flow on a flaky read is worse than
+  // missing a warning — but it must not be presented as a check that passed either.
+  const record = (name, detail, ok, problem, checked = true) => {
+    checks.push({ name, detail, ok, checked });
     if (!ok) problems.push(problem);
   };
 
@@ -791,7 +841,7 @@ function checksBeforeSigning(offer, role) {
   } catch {
     // An unreadable authenticator is not evidence of a problem, and guessing here would block a
     // working flow. The settlement still refuses if it really is missing.
-    record('the wrapper is allowlisted as a solver', 'not readable', true, null);
+    record('the wrapper is allowlisted as a solver', 'not readable', true, null, false);
   }
 
   const state = wrapperOfferState(computed.offerId);
@@ -824,7 +874,7 @@ function checksBeforeSigning(offer, role) {
       );
     }
   } catch {
-    record('this side holds what it is selling', 'not readable', true, null);
+    record('this side holds what it is selling', 'not readable', true, null, false);
   }
 
   // A contract account's own rules decide how many signatures it needs, and gathering them is its
@@ -843,7 +893,7 @@ function checksBeforeSigning(offer, role) {
       account.messageHash = ownerMessageHash(side.owner, side.digest);
       record('this account can be authorised by its own rules', `${account.threshold} of ${account.owners} owners`, true, null);
     } catch {
-      record('this account can be authorised by its own rules', 'not a readable multisig', true, null);
+      record('this account can be authorised by its own rules', 'not a readable multisig', true, null, false);
     }
   }
 
