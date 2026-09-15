@@ -528,6 +528,42 @@ test('a smart contract account is asked for a Safe message, not the trade typed 
   }
 });
 
+test('a dead offer offers the way out, not a wait', async () => {
+  const fixture = await serviceWith({});
+  const browser = await launchChrome();
+  try {
+    const offer = await createOffer(fixture.port, { sellAmount: '100000000' });
+    // Past its deadline: no order from it can fill, so the page must not suggest waiting.
+    const record = offerRecord(fixture.root, offer.id);
+    record.computed.validTo = Math.floor(Date.now() / 1000) - 60;
+    fs.writeFileSync(
+      path.join(fixture.root, 'out-json', 'link', `${offer.id}.json`),
+      JSON.stringify(record, null, 2),
+    );
+
+    await browser.open(offerUrl(fixture.port, offer.id));
+    // Wait for the connected view, not the status pill: the pill says "expired" before the wallet has
+    // connected, and the recovery section only exists once a party is known.
+    await browser.waitFor("document.body.innerText.toLowerCase().includes('your part')", 'the connected view');
+
+    const says = await browser.evaluate(
+      "document.body.innerText.toLowerCase().includes('passed its deadline')",
+    );
+    assert.equal(says, true, 'the page did not explain why nothing more will happen');
+
+    const residue = await browser.evaluate("document.body.innerText.toLowerCase().includes('still in your shed')");
+    assert.equal(residue, true, 'the page did not say where the funded tokens are');
+
+    const move = await browser.evaluate(
+      "[...document.querySelectorAll('button')].some((b) => /Move .* to my wallet/.test(b.textContent))",
+    );
+    assert.equal(move, true, 'no way out was offered');
+  } finally {
+    browser.close();
+    await fixture.stop();
+  }
+});
+
 // --- runner ---------------------------------------------------------------------------------------
 
 async function main() {

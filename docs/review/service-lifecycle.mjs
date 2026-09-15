@@ -459,6 +459,32 @@ test('one unreadable chain read is not remembered as a fact', async () => {
   assert.equal(after.body.funding.mode, 'permit', 'the owner is still being treated as a contract account');
 });
 
+test('an order that can no longer fill is reported expired, not settling', async () => {
+  const root = currentRoot;
+  const offer = await createOffer(port, { sellAmount: '6' });
+  await signAs(port, offer.id);
+  const taker = await signAs(port, offer.id, 'taker');
+  const accepted = await call(port, 'POST', `/offers/${offer.id}/accept`, taker);
+  assert.equal(accepted.status, 202, JSON.stringify(accepted.body));
+  assert.equal((await call(port, 'GET', `/offers/${offer.id}/status`)).body.status, 'settling');
+
+  // Wind the deadline past. The chain would refuse this order now, so "settling" would invite a wait
+  // that can never end — and would hide the withdrawal the party may need.
+  const record = offerRecord(root, offer.id);
+  record.computed.validTo = Math.floor(Date.now() / 1000) - 60;
+  fs.writeFileSync(path.join(root, 'out-json', 'link', `${offer.id}.json`), JSON.stringify(record, null, 2));
+
+  const dead = await call(port, 'GET', `/offers/${offer.id}/status`);
+  assert.equal(dead.body.status, 'expired', JSON.stringify(dead.body));
+  assert.equal(dead.body.wrapperState, 'available');
+  assert.equal(dead.body.orderUid, accepted.body.orderUid, 'the evidence should still be reported');
+
+  // But a consumed offer past its deadline is a settlement in flight, not a dead one.
+  setChain(root, { offerState: { [offer.offerId]: 1 } });
+  const consumed = await call(port, 'GET', `/offers/${offer.id}/status`);
+  assert.equal(consumed.body.status, 'settling', 'a consumed offer was reported as expired');
+});
+
 // --- runner ---------------------------------------------------------------------------------------
 
 async function main() {

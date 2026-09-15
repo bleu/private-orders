@@ -577,17 +577,28 @@ async function status(offer) {
   const txHash = order.status === 'fulfilled' ? await settlementTx(offer.orderUid) : null;
   const receipt = transactionReceipt(txHash);
   const settled = order.status === 'fulfilled' && txHash && receiptSucceeded(receipt) && wrapperState === 'consumed';
-  return {
-    status: settled ? 'settled' : 'settling',
-    orderUid: offer.orderUid,
-    settlementTx: txHash,
-    wrapperState,
-    evidence: {
-      orderStatus: order.status ?? 'unknown',
-      receiptSucceeded: receipt ? receiptSucceeded(receipt) : null,
-      blockNumber: receipt?.blockNumber ?? null,
-    },
+  const evidence = {
+    orderStatus: order.status ?? 'unknown',
+    receiptSucceeded: receipt ? receiptSucceeded(receipt) : null,
+    blockNumber: receipt?.blockNumber ?? null,
   };
+
+  if (settled) {
+    return { status: 'settled', orderUid: offer.orderUid, settlementTx: txHash, wrapperState, evidence };
+  }
+
+  // Past its deadline, with nothing filled and nothing consumed, this order cannot settle: the chain
+  // enforces the expiry, so every solver that looks at it will refuse it. Calling that "settling"
+  // invites the reader to wait for something that can no longer happen, and hides the withdrawal they
+  // may now need — the order is dead, but the tokens it was going to spend are in their Shed. A filled
+  // order or a consumed offer means a settlement is genuinely in flight, so neither is reported as
+  // expired.
+  const expired = Number(offer.computed?.validTo ?? 0) * 1000 < Date.now();
+  if (expired && order.status !== 'fulfilled' && wrapperState !== 'consumed') {
+    return { status: 'expired', orderUid: offer.orderUid, settlementTx: txHash, wrapperState, evidence };
+  }
+
+  return { status: 'settling', orderUid: offer.orderUid, settlementTx: txHash, wrapperState, evidence };
 }
 
 /// What a party must do before signing.

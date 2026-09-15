@@ -278,6 +278,47 @@ function tokenOf(address) {
   return { symbol: address.slice(0, 6) + '…', decimals: 18 };
 }
 
+/// Everything still sitting in this party's Shed, with one signature to move it out.
+///
+/// Shown after a settlement and after a trade dies. Both cases leave the same residue in the same
+/// place, and the party needs the same one-tap way out of it.
+function appendShedContents(app, reason) {
+  const held = plan && !plan.empty ? plan.amounts.map((a, i) => ({ ...tokenOf(plan.targets[i]), amount: a })) : [];
+  if (moved) {
+    app.append(frag('<div class="note ok">Moved to your wallet.</div>'));
+    return;
+  }
+  if (!held.length) {
+    app.append(frag('<div class="note">Your Shed is empty — everything is in your wallet.</div>'));
+    return;
+  }
+  const what = held.map((h) => esc(amount(h.amount, h.decimals)) + ' ' + esc(h.symbol)).join(' and ');
+  app.append(frag('<div class="note">' + what + ' ' + (held.length > 1 ? 'are' : 'is') +
+    ' still in your Shed: ' + (held.length > 1 ? 'tokens' : 'a token') + ' ' + esc(reason) + '. ' +
+    'One signature moves ' + (held.length > 1 ? 'them' : 'it') + ' to your wallet, and you still pay no gas.</div>'));
+  const move = node('<button>Move ' + what + ' to my wallet</button>');
+  move.onclick = async () => {
+    move.disabled = true;
+    move.textContent = 'Check your wallet…';
+    try {
+      failure = null;
+      const [active] = await usable.request({ method: 'eth_accounts' });
+      if (!active || active.toLowerCase() !== account.toLowerCase()) {
+        throw new Error('The active account in your wallet is ' + (active ? short(active) : 'not set') +
+          ', but this trade is with ' + short(account) + '.');
+      }
+      const signature = await signDigest(plan.typedData, plan.digest);
+      await post('/offers/' + id + '/withdraw', { address: account, signature });
+      moved = true;
+      await loadRole();
+    } catch (err) {
+      failure = describe(err);
+      render();
+    }
+  };
+  app.append(move);
+}
+
 // The public view is written from the maker's side. Until we know who is asking, the labels stay
 // neutral; once we do, they are the reader's own.
 function terms() {
@@ -361,39 +402,20 @@ function render() {
       esc(offer.settlementTx ? offer.settlementTx : 'recorded, transaction not found') + '</span></div>' +
       '<div class="row"><small>Order</small><small class="addr">' + esc(short(offer.orderUid ?? '')) + '</small></div>' +
       '</div>'));
-    const held = plan && !plan.empty ? plan.amounts.map((a, i) => ({ ...tokenOf(plan.targets[i]), amount: a })) : [];
-    if (moved) {
-      app.append(frag('<div class="note ok">Moved to your wallet.</div>'));
-    } else if (!held.length) {
-      app.append(frag('<div class="note">Your Shed is empty — everything is in your wallet.</div>'));
-    } else {
-      const what = held.map((h) => esc(amount(h.amount, h.decimals)) + ' ' + esc(h.symbol)).join(' and ');
-      app.append(frag('<div class="note">' + what + ' ' + (held.length > 1 ? 'are' : 'is') +
-        ' still in your Shed: ' + (held.length > 1 ? 'tokens' : 'a token') + ' this trade did not spend. ' +
-        'One signature moves ' + (held.length > 1 ? 'them' : 'it') + ' to your wallet, and you still pay no gas.</div>'));
-      const move = node('<button>Move ' + what + ' to my wallet</button>');
-      move.onclick = async () => {
-        move.disabled = true;
-        move.textContent = 'Check your wallet…';
-        try {
-          failure = null;
-          const [active] = await usable.request({ method: 'eth_accounts' });
-          if (!active || active.toLowerCase() !== account.toLowerCase()) {
-            throw new Error('The active account in your wallet is ' + (active ? short(active) : 'not set') +
-              ', but this trade is with ' + short(account) + '.');
-          }
-          const signature = await signDigest(plan.typedData, plan.digest);
-          await post('/offers/' + id + '/withdraw', { address: account, signature });
-          moved = true;
-          await loadRole();
-        } catch (err) {
-          failure = describe(err);
-          render();
-        }
-      };
-      app.append(move);
-    }
+    appendShedContents(app, 'this trade did not spend');
     return;
+  }
+
+  // The trade cannot happen any more, but the Shed may still hold what this side funded it with. A
+  // dead offer is not a dead end: the tokens are in a contract only this party can open, and saying so
+  // is the difference between "stuck" and "recoverable".
+  if (offer.status === 'expired' || offer.status === 'recovery_available') {
+    app.append(frag('<h2>' + (offer.status === 'expired' ? 'Expired' : 'Needs recovery') + '</h2>'));
+    app.append(frag('<div class="note">' + (offer.status === 'expired'
+      ? 'This offer passed its deadline, so no order from it can fill and nothing more will happen on its own.'
+      : 'Funding succeeded, but the order was never placed.' + (offer.error ? ' ' + esc(offer.error) : '')) +
+      '</div>'));
+    appendShedContents(app, 'what was funded for it');
   }
 
   // One signature per press. Four queued prompts is where wallets stall, and a stall is
