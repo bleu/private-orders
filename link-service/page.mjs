@@ -419,13 +419,30 @@ function render() {
   // The trade cannot happen any more, but the Shed may still hold what this side funded it with. A
   // dead offer is not a dead end: the tokens are in a contract only this party can open, and saying so
   // is the difference between "stuck" and "recoverable".
-  if (offer.status === 'expired' || offer.status === 'recovery_available') {
-    app.append(frag('<h2>' + (offer.status === 'expired' ? 'Expired' : 'Needs recovery') + '</h2>'));
-    app.append(frag('<div class="note">' + (offer.status === 'expired'
-      ? 'This offer passed its deadline, so no order from it can fill and nothing more will happen on its own.'
-      : (offer.recoveryReason || 'The order was never placed, so nothing from this offer can fill.') +
-        (offer.error ? ' ' + esc(offer.error) : '')) +
-      '</div>'));
+  //
+  // A cancelled offer belongs in this list for the same reason as the other two. The maker keeps the right to
+  // cancel, and can exercise it after the taker's bundles were relayed — which funds the taker's Shed
+  // and then leaves the offer dead. Answering that with a status and no way to move the tokens back
+  // would be the one state where the page strands someone. (Backticks are not used here: this whole
+  // render function is text inside a template literal, and a raw backtick would end it.)
+  const deadEnd = {
+    expired: {
+      title: 'Expired',
+      note: 'This offer passed its deadline, so no order from it can fill and nothing more will happen on its own.',
+    },
+    recovery_available: {
+      title: 'Needs recovery',
+      note: (offer.recoveryReason || 'The order was never placed, so nothing from this offer can fill.') +
+        (offer.error ? ' ' + esc(offer.error) : ''),
+    },
+    cancelled: {
+      title: 'Cancelled',
+      note: 'The maker cancelled this offer, so it can no longer fill.',
+    },
+  }[offer.status];
+  if (deadEnd) {
+    app.append(frag('<h2>' + deadEnd.title + '</h2>'));
+    app.append(frag('<div class="note">' + deadEnd.note + '</div>'));
     appendShedContents(app, 'what was funded for it');
   }
 

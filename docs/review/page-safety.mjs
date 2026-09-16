@@ -470,6 +470,41 @@ test('an offer that cannot settle disables the button and says why', async () =>
   }
 });
 
+test('a cancelled offer offers the way back out of the Shed', async () => {
+  // A cancellation is the one dead end that can arrive *after* funding: the maker can cancel once the
+  // taker's bundles have been relayed, which puts tokens in the taker's Shed. Before this branch
+  // existed, a cancelled offer rendered a status pill and nothing else — no way to move them back.
+  const fixture = await serviceWith();
+  const browser = await launchChrome();
+  try {
+    const offer = await createOffer(fixture.port, { sellAmount: '100000000' });
+    // The wrapper's answer is what decides the status, so the chain state is what makes it cancelled.
+    setChain(fixture.root, { offerState: { [offer.offerId]: 2 } });
+
+    await browser.open(offerUrl(fixture.port, offer.id));
+    // Wait for the branch itself, not for the status pill: the pill is drawn before the wallet is
+    // connected, and the page renders only "connect a wallet" until it is.
+    await browser.waitFor(
+      "document.body.innerText.toLowerCase().includes('the maker cancelled this offer')",
+      'the cancelled-offer page',
+    );
+
+    const said = await browser.evaluate(
+      "document.body.innerText.toLowerCase().includes('the maker cancelled this offer')",
+    );
+    assert.equal(said, true, 'the page did not say the offer was cancelled');
+
+    // Either answer about the Shed is acceptable — what is not acceptable is saying nothing about it.
+    const shed = await browser.evaluate(
+      "const t = document.body.innerText.toLowerCase(); t.includes('still in your shed') || t.includes('your shed is empty')",
+    );
+    assert.equal(shed, true, 'the page said nothing about what the Shed holds');
+  } finally {
+    browser.close();
+    await fixture.stop();
+  }
+});
+
 test('a smart contract account is told what it is and funds by approval', async () => {
   const fixture = await serviceWith({}, { contracts: [MAKER] });
   const browser = await launchChrome();

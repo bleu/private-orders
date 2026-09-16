@@ -30,4 +30,6 @@ node "$ROOT/docs/review/service-lifecycle.mjs"
 node "$ROOT/docs/review/service-concurrency.mjs"
 # Refusals whose value is the sentence, not the status.
 node "$ROOT/docs/review/service-guards.mjs"
+# The maker cancelling while an acceptance is in flight, in two different windows.
+node "$ROOT/docs/review/service-cancellation-race.mjs"
 node "$ROOT/docs/review/page-safety.mjs"

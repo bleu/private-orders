@@ -119,7 +119,12 @@ export async function loadService({ root, state = chainState() }) {
     URL,
     Buffer,
     Date,
-    fetch: async () => ({ ok: true, json: async () => ({ status: state.orderState }), text: async () => '{}' }),
+    // `orderbookDelayMs` lets a test hold a request inside the orderbook round trip, which is the only
+    // window an acceptance waits on that a test cannot reach by delivering a body late.
+    fetch: async () => {
+      if (state.orderbookDelayMs) await new Promise((resolve) => setTimeout(resolve, state.orderbookDelayMs));
+      return { ok: true, json: async () => ({ status: state.orderState }), text: async () => '{}' };
+    },
     render: () => '',
     renderCreate: () => '',
   };

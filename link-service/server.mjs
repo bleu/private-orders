@@ -155,9 +155,44 @@ function saveFresh(id, change, fallback) {
 /// window — measured, a concurrent maker and taker submission loses one without it. `serialize` around
 /// the call is the same guarantee made structural, so a later `await` added between the read and the
 /// write cannot reopen it.
+/// What an acceptance says when the maker cancelled while it was in flight.
+const CANCELLED_DURING_ACCEPTANCE =
+  'the maker cancelled this offer while its acceptance was in flight, so no order from it will settle';
+
+/// One terminal write of an acceptance, refusing if the maker cancelled while it was in flight.
+///
+/// A cancellation can land anywhere in an acceptance — before the relay, before the feed is published,
+/// or during the orderbook round trip — because cancelling is the right the maker keeps. Each write
+/// therefore re-reads inside the offer's queue and stops if the offer is dead. Without that, an
+/// acceptance republishes the feed for a cancelled offer and records it as settling: a 202 for a trade
+/// that cannot happen. The wrapper still refuses to settle it, so no money is at risk; what is wrong is
+/// the answer, and the stale feed entry the sub-solver would pick up next.
+///
+/// The caller's snapshot is refreshed from what was written, as `saveFresh` does.
+function acceptWrite(offer, change) {
+  return serialize(offer.id, () => {
+    const fresh = loadOffer(offer.id) ?? offer;
+    if (fresh.cancelledAt) {
+      return { refused: { status: 409, body: { error: CANCELLED_DURING_ACCEPTANCE } } };
+    }
+    change(fresh);
+    saveOffer(fresh);
+    Object.assign(offer, fresh);
+    return { fresh };
+  });
+}
+
 function recordSignature(offer, body) {
   if (!['maker', 'taker'].includes(body.role)) {
     return { status: 400, body: { error: 'role must be maker or taker' } };
+  }
+  // The maker already invalidated this offer on chain. Taking a signature for it spends a wallet prompt
+  // on a trade that cannot happen, and answering 200 would claim it was recorded for one.
+  if (offer.cancelledAt) {
+    return {
+      status: 409,
+      body: { error: 'the maker cancelled this offer, so nothing more can be signed for it' },
+    };
   }
   const side = body.role === 'maker' ? offer.computed.makerBundle : offer.computed.takerBundle;
   const shape = signatureProblem(side.owner, body.signature);
@@ -1414,13 +1449,14 @@ const server = http.createServer(async (req, res) => {
           }
         }
 
-        saveFresh(offer.id, (fresh) => {
+        const started = await acceptWrite(offer, (fresh) => {
           fresh.signatures.taker = signature;
           if (body.permitSignature) fresh.permits.taker = body.permitSignature;
           fresh.acceptance ??= { attemptId: crypto.randomUUID(), startedAt: new Date().toISOString() };
           fresh.acceptance.phase = 'funding';
           delete fresh.acceptance.error;
-        }, offer);
+        });
+        if (started.refused) return json(res, started.refused.status, started.refused.body);
 
         // Taken here, immediately before the work, and not a line earlier: every check above can
         // return, and a lock held across a return never comes back — the offer would report "already
@@ -1437,26 +1473,35 @@ const server = http.createServer(async (req, res) => {
             fresh.acceptance.phase = 'funded';
           }, offer);
 
-          // Publish atomically so the sub-solver never observes a partial plan.
           const target = path.join(OFFERS_DIR, `${offer.id}.json`);
-          const temporary = `${target}.${offer.acceptance.attemptId}.tmp`;
-          fs.writeFileSync(temporary, JSON.stringify(offer.computed, null, 2));
-          fs.renameSync(temporary, target);
-          saveFresh(offer.id, (fresh) => {
+          const published = await acceptWrite(offer, (fresh) => {
+            // Publish atomically so the sub-solver never observes a partial plan.
+            const temporary = `${target}.${offer.acceptance.attemptId}.tmp`;
+            fs.writeFileSync(temporary, JSON.stringify(offer.computed, null, 2));
+            fs.renameSync(temporary, target);
             fresh.acceptance ??= {};
             fresh.acceptance.phase = 'published';
-          }, offer);
+          });
+          if (published.refused) return json(res, published.refused.status, published.refused.body);
 
           const orderUid = await postOrder(offer.computed.takerOrder);
-          const settledRecord = saveFresh(offer.id, (fresh) => {
+          const settled = await acceptWrite(offer, (fresh) => {
             fresh.orderUid = orderUid;
             fresh.acceptedAt = new Date().toISOString();
             fresh.acceptance ??= {};
             fresh.acceptance.phase = 'settling';
-          }, offer);
+          });
+          if (settled.refused) {
+            // The order reached the book and cannot fill, and the feed entry published for it has to go
+            // with it: that entry is exactly what the sub-solver would pick up next.
+            fs.rmSync(path.join(OFFERS_DIR, `${offer.id}.json`), { force: true });
+            // The order UID is still a fact worth reporting, even though the offer is not recorded as
+            // accepted — the caller can find the dead order on the book with it.
+            return json(res, 409, { ...settled.refused.body, orderUid });
+          }
 
           return json(res, 202, {
-            id: settledRecord.id,
+            id: settled.fresh.id,
             orderUid,
             status: 'settling',
             relay: relayLog,
