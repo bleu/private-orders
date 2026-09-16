@@ -259,6 +259,15 @@ with whichever account is selected rather than the one the page connected with.
 
 ## Known gaps
 
+- **A token that delivers less than it is sent does not settle, and that is the settlement's doing, not
+  this code's.** A fee-on-transfer token makes the pair revert rather than pay short: the settlement
+  cannot send out more of a token than it received, so the fill rolls back with everything else and the
+  offer stays unspent. What the wrapper's post-check establishes is the other thing — that a settlement
+  recorded a fill at all — because `filledAmount` is written from the order's amounts and the clearing
+  prices before any transfer happens, and is never read from a balance. `test/PrivateTradeTokens.t.sol`
+  asserts both halves, with a control that settles exactly. A token that refuses a non-zero to
+  non-zero approval is likewise safe here only because a fill consumes the allowance to zero, which
+  the same file pins: `feeAmount` zero and fill-or-kill are what make that true.
 - **An unreadable chain can report `expired` where a settlement is unknown.** Expiry is only decided
   when the evidence reads back: while an order still looks fulfilled or its wrapper state is consumed,
   the status waits rather than declaring the offer dead. If the first reading after the deadline fails,
