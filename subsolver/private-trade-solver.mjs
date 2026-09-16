@@ -19,6 +19,9 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 
+// 9100 is node_exporter's well-known port. A host that runs it refuses this bind with EADDRINUSE, which
+// reads as "the sub-solver is broken" rather than "the port was taken", so set PORT to move it — and
+// keep `endpoint` in the driver config (`config/offline/driver.toml`) in step with it.
 const PORT = Number(process.env.PORT ?? 9100);
 const OFFERS_DIR = process.env.OFFERS_DIR ?? '/tmp/private-trade-offers';
 const OFFER_FILE = process.env.OFFER_FILE ?? null;

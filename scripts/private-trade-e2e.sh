@@ -72,7 +72,7 @@ log "starting the sub-solver on ${SUBSOLVER_PORT}"
 pkill -f private-trade-solver 2>/dev/null || true
 rm -f /tmp/private-trade-solve.log
 OFFER_FILE="${ROOT}/out-json/private-trade-offer.json" SOLVE_LOG=/tmp/private-trade-solve.log \
-  nohup node "${ROOT}/subsolver/private-trade-solver.mjs" >/tmp/subsolver.out 2>&1 &
+  PORT="${SUBSOLVER_PORT}" nohup node "${ROOT}/subsolver/private-trade-solver.mjs" >/tmp/subsolver.out 2>&1 &
 sleep 2
 curl -fsS "http://localhost:${SUBSOLVER_PORT}/" >/dev/null
 
