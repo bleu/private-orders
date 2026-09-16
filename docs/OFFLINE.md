@@ -225,3 +225,19 @@ Without `OFFLINE_RPC` the test is skipped, so a plain `forge test` stays hermeti
 - Runtime deployments are **not** persistent: the `chain` service runs anvil without
   `--dump-state`, so contracts deployed after startup vanish on `docker compose up` with a recreated
   container. The test deploys the wrapper per run inside a fork, which sidesteps this.
+
+## Putting the demo in front of someone
+
+`scripts/demo/` is the runbook for a demo on this stack: the four commands to bring it up, how to expose
+it on a tailnet, and what a visitor does. Two parts of it are worth knowing here, because they are
+properties of the stack rather than of a script:
+
+- **A visitor needs the demo tokens and has none.** The fork carries the real mainnet DAI and USDC
+  contracts, so there is no `mint` to call. `scripts/demo/faucet-up.sh` runs a page that impersonates a
+  pre-funded anvil account and sends from it — the same trick the end-to-end scripts use. Without it a
+  self-serve demo stalls at the first step, with an error about allowance that reads as a bug in our
+  code.
+- **Only the service needs exposing, not the chain.** A party signs EIP-712 typed data and nothing else,
+  and the chain id in that data is 1, so their wallet is already on the right network and never needs a
+  node. That is what keeps anvil — whose admin methods are open and whose keys are public knowledge —
+  off the network entirely.
