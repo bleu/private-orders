@@ -61,8 +61,10 @@ const CONFIG = {
 };
 
 // A development wallet: the page can ask this service to sign with a key it was given, which is what
-// lets the whole flow be driven in a browser without a wallet extension. Enabled only when keys are
-// configured, and it will only sign for the addresses it was handed.
+// lets the whole flow be driven in a browser without a wallet extension. Those routes are a signing
+// and broadcast oracle for exactly these keys, so setting the keys (which the e2e scripts do) must
+// not expose them on a reachable service: the routes need an explicit opt-in on top of the keys,
+// and they will only act for the addresses they were handed.
 const DEV_KEYS = new Map(
   (process.env.PRIVATE_TRADE_DEV_KEYS ?? '')
     .split(',')
@@ -72,7 +74,7 @@ const DEV_KEYS = new Map(
       return [address.trim().toLowerCase(), key.trim()];
     }),
 );
-const DEV_WALLET = DEV_KEYS.size > 0;
+const DEV_WALLET = DEV_KEYS.size > 0 && process.env.DEV_ENDPOINTS === '1';
 
 fs.mkdirSync(STORE, { recursive: true });
 fs.mkdirSync(OFFERS_DIR, { recursive: true });
@@ -100,6 +102,27 @@ const readBody = (req) =>
 
 /// Offers with an acceptance running in this process. See the guard in the accept handler.
 const accepting = new Set();
+
+/// Fixed-window rate limit for the offer create route, keyed by client address.
+///
+/// `POST /offers` takes no signature, runs a full `forge script`, and grows the on-disk store for
+/// every request that succeeds — a reachable service without a window on that route is a
+/// resource-burn vector. The key falls back to 'unknown' when the socket address is not readable,
+/// which is a tighter bucket, not a looser one.
+const OFFERS_PER_HOUR = Number(process.env.OFFERS_PER_HOUR ?? 60);
+const offerHits = new Map();
+function withinOfferLimit(req) {
+  const key = String(req.socket?.remoteAddress ?? 'unknown');
+  const now = Date.now();
+  const fresh = (offerHits.get(key) ?? []).filter((seen) => now - seen < 3600e3);
+  if (fresh.length >= OFFERS_PER_HOUR) {
+    offerHits.set(key, fresh);
+    return false;
+  }
+  fresh.push(now);
+  offerHits.set(key, fresh);
+  return true;
+}
 
 const offerPath = (id) => path.join(STORE, `${id}.json`);
 const loadOffer = (id) => (fs.existsSync(offerPath(id)) ? JSON.parse(fs.readFileSync(offerPath(id), 'utf8')) : null);
@@ -1128,6 +1151,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && parts[0] === 'offers' && parts.length === 1) {
+      if (!withinOfferLimit(req)) {
+        return json(res, 429, {
+          error: `too many offers from this address in the last hour; the limit is ${OFFERS_PER_HOUR}`,
+        });
+      }
       const body = await readBody(req);
       if (!/^0x[0-9a-fA-F]{40}$/.test(body.taker ?? '') || /^0x0{40}$/i.test(body.taker)) {
         return json(res, 400, { error: 'a concrete taker address is required for this beta' });
@@ -1540,9 +1568,26 @@ const server = http.createServer(async (req, res) => {
 
     json(res, 404, { error: 'not found' });
   } catch (err) {
-    json(res, 500, { error: err.message, stderr: String(err.stderr ?? '').slice(0, 800) });
+    // The operator gets the full error in this log. The client gets the reason, with the invocation
+    // and endpoints removed: the raw error carries the full command line, and the 500 is read by
+    // whoever sent the request.
+    console.log('request failed:', err);
+    json(res, 500, { error: clientSafeError(err) });
   }
 });
+
+/// What a client may see in a 500: the reason, without the invocation.
+///
+/// `execFileSync` failures carry `Command failed: <full command line>` (script paths, the
+/// `--rpc-url` endpoint) and the child's stderr. Neither belongs in a body that reaches an
+/// unauthenticated caller; the log above has both.
+function clientSafeError(err) {
+  let message = String(err?.message ?? 'internal error');
+  message = message.replace(/^Command failed:.*\n?/, '');
+  message = message.replace(/--rpc-url \S+/g, '');
+  message = message.trim().slice(0, 300);
+  return message || 'an internal step failed; see the service log';
+}
 
 server.listen(PORT, () => {
   console.log(`private trade link service on ${PUBLIC_URL} (rpc ${RPC}, orderbook ${ORDERBOOK})`);

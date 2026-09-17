@@ -57,13 +57,14 @@ node "${ROOT}/scripts/check-page.mjs" || exit 1
 log "starting the sub-solver"
 pkill -f private-trade-solver 2>/dev/null || true
 rm -rf out-json/sub-solver-offers; mkdir -p out-json/sub-solver-offers
-OFFERS_DIR="${ROOT}/out-json/sub-solver-offers" nohup node "${ROOT}/subsolver/private-trade-solver.mjs" \
+OFFERS_DIR="${ROOT}/out-json/sub-solver-offers" HOST=0.0.0.0 nohup node "${ROOT}/subsolver/private-trade-solver.mjs" \
   >/tmp/subsolver.out 2>&1 &
 
 log "starting the link service with two development wallets"
 pkill -f "link-service/server.mjs" 2>/dev/null || true
 sleep 1
 PRIVATE_TRADE_DEV_KEYS="${MAKER}=${MAKER_KEY},${TAKER}=${TAKER_KEY}" \
+  DEV_ENDPOINTS=1 \
   DEFAULT_SELL_TOKEN="${USDC_ADDRESS}" \
   DEFAULT_BUY_TOKEN="${DAI_ADDRESS}" \
   SUBSOLVER_OFFERS_DIR="${ROOT}/out-json/sub-solver-offers" \

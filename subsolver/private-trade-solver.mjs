@@ -23,6 +23,14 @@ import path from 'node:path';
 // reads as "the sub-solver is broken" rather than "the port was taken", so set PORT to move it — and
 // keep `endpoint` in the driver config (`config/offline/driver.toml`) in step with it.
 const PORT = Number(process.env.PORT ?? 9100);
+// The driver is the only expected caller, and it is usually on this machine. Listening on every
+// interface would hand an unauthenticated, unbounded endpoint to anyone who can reach the host.
+// The demo's driver runs in a container and reaches the sub-solver through host.docker.internal,
+// so the demo scripts set HOST=0.0.0.0 explicitly.
+const HOST = process.env.HOST ?? '127.0.0.1';
+/// How much of one request to accept. A real auction here carries two orders; more than this is
+/// not an auction, and a body is not a document: the log keeps a sample, not a copy, of it.
+const MAX_BODY = 5e6;
 const OFFERS_DIR = process.env.OFFERS_DIR ?? '/tmp/private-trade-offers';
 const OFFER_FILE = process.env.OFFER_FILE ?? null;
 const SOLVE_LOG = process.env.SOLVE_LOG ?? '/tmp/private-trade-solve.log';
@@ -114,10 +122,19 @@ const server = http.createServer((req, res) => {
   }
 
   let body = '';
+  let rejected = false;
   req.on('data', (chunk) => {
+    if (rejected) return;
     body += chunk;
+    if (body.length > MAX_BODY) {
+      rejected = true;
+      log({ at: new Date().toISOString(), refused: `body of ${body.length} bytes exceeds ${MAX_BODY}` });
+      res.writeHead(413, { 'content-type': 'text/plain' }).end('payload too large');
+      req.destroy();
+    }
   });
   req.on('end', () => {
+    if (rejected) return;
     let auction;
     try {
       auction = JSON.parse(body);
@@ -134,7 +151,9 @@ const server = http.createServer((req, res) => {
     log({
       at: new Date().toISOString(),
       auctionId: auction.id ?? null,
-      orders: orders.map((o) => ({
+      // A sample, not a copy: a request can carry more bytes than one log line should cost.
+      orderCount: orders.length,
+      orders: orders.slice(0, 200).map((o) => ({
         uid: o.uid,
         owner: o.owner,
         appData: o.appData,
@@ -155,7 +174,7 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  log({ at: new Date().toISOString(), listening: PORT, offersDir: OFFERS_DIR });
-  console.log(`private trade sub-solver listening on ${PORT}, offers in ${OFFERS_DIR}`);
+server.listen(PORT, HOST, () => {
+  log({ at: new Date().toISOString(), listening: `${HOST}:${PORT}`, offersDir: OFFERS_DIR });
+  console.log(`private trade sub-solver listening on ${HOST}:${PORT}, offers in ${OFFERS_DIR}`);
 });

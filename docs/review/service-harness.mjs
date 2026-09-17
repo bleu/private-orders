@@ -53,6 +53,15 @@ export async function loadService({ root, state = chainState() }) {
     // process's, so the stub has to read them from there.
     const env = options.env ?? process.env;
     if (bin === 'forge') {
+      // A test makes a run fail the way a real one does: the `Command failed:` line carries the full
+      // invocation, and stderr carries the child's output.
+      if (state.forgeFail) {
+        const err = new Error(
+          `Command failed: forge script script/LinkCompute.s.sol --rpc-url ${state.forgeFail.rpc ?? 'http://internal:8545'} -q`,
+        );
+        err.stderr = state.forgeFail.stderr ?? 'Error: script failed';
+        throw err;
+      }
       // The withdrawal plan is computed by a script, so the stub has to produce the file the service
       // reads back — otherwise only the paths that do not call `forge` can be driven here.
       if (String(args[1] ?? '').endsWith('Withdraw.s.sol') && env.WITHDRAW_REQUEST_FILE) {

@@ -57,9 +57,18 @@ const CSS = `
   @keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}
 `;
 
+/// Embed a value in a page's `<script>` block.
+///
+/// `JSON.stringify` alone cannot keep a value from ending the block it is embedded in: a
+/// `</script>` in the text closes the tag, and what follows is parsed as a new script. Encoding
+/// `<` as `\u003c` produces identical JSON — the page reads the same value — with nothing left
+/// that can close the tag. No backtick ever appears in the output, so a page template literal
+/// stays intact.
+const scriptJson = (value) => JSON.stringify(value).replace(/</g, '\\u003c');
+
 /// A wallet that asks the service to sign with a key it was given, so the flow can be driven in a
-/// browser without an extension. Off unless the service was started with development keys, and it
-/// will only sign for the addresses it holds.
+/// browser without an extension. Off unless the service was started with development keys and the
+/// explicit opt-in for exposing them, and it will only sign for the addresses it holds.
 const devWalletShim = (enabled) => (enabled ? `
 <script>
 (function () {
@@ -125,7 +134,7 @@ export const render = (id, options = {}) => `<!doctype html>
 <div id="app"></div>
 ${devWalletShim(options.devWallet)}
 <script>
-const id = ${JSON.stringify(id)};
+const id = ${scriptJson(id)};
 
 // A fragment, so a caller can pass several top-level nodes. Anything needing a handle on a single
 // element asks for it with node().
@@ -807,7 +816,7 @@ auction, and neither of you sends a transaction.</p>
 ${devWalletShim(devWallet)}
 
 <script>
-const DEFAULTS = ${JSON.stringify(defaults ?? {})};
+const DEFAULTS = ${scriptJson(defaults ?? {})};
 const el = (h) => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content; };
 const node = (h) => el(h).firstElementChild;
 // Untrusted text arrives as text: a token address or a failure message from the service is not

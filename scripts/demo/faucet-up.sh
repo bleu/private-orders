@@ -22,7 +22,7 @@ printf '\n==> starting the demo faucet on %s, DAI %s, USDC %s\n' "${FAUCET_PORT}
 pkill -f "[d]emo-faucet" 2>/dev/null || true
 sleep 1
 cd "${ROOT}"
-RPC="${RPC}" DAI="${DAI_ADDRESS}" USDC="${USDC_ADDRESS}" PORT="${FAUCET_PORT}" \
+RPC="${RPC}" DAI="${DAI_ADDRESS}" USDC="${USDC_ADDRESS}" PORT="${FAUCET_PORT}" HOST=0.0.0.0 \
   AMOUNT_DAI="${AMOUNT_DAI:-10000}" AMOUNT_USDC="${AMOUNT_USDC:-10000}" \
   setsid nohup node scripts/demo-faucet.mjs >>/tmp/faucet.out 2>&1 < /dev/null &
 sleep 2

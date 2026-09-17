@@ -32,4 +32,6 @@ node "$ROOT/docs/review/service-concurrency.mjs"
 node "$ROOT/docs/review/service-guards.mjs"
 # The maker cancelling while an acceptance is in flight, in two different windows.
 node "$ROOT/docs/review/service-cancellation-race.mjs"
+# The unauthenticated surface: dev gate, 500 disclosure, rate window, page escape, body caps, binds.
+node "$ROOT/docs/review/service-hygiene.mjs"
 node "$ROOT/docs/review/page-safety.mjs"

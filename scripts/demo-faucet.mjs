@@ -108,6 +108,19 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // An address is funded once per faucet process. The faucet is an unauthenticated GET on a demo
+  // chain, and without a cap a loop over one address drains the funder account, which can only
+  // mint so much on this fork. Registered before the transfer: a failed attempt means the chain
+  // is broken, and retrying in a loop is exactly the drain.
+  const key = address.toLowerCase();
+  if (funded.has(key)) {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(page(
+      `<p class="muted"><code>${address}</code> was already funded in this session. The demo gives one round of tokens per address; restart the faucet to fund more.</p>`,
+    ));
+    return;
+  }
+  funded.add(key);
+
   let results;
   try {
     results = fund(address);
@@ -127,9 +140,15 @@ const server = http.createServer((req, res) => {
   ));
 });
 
+/// One round of tokens per address, per process. See the handler.
+const funded = new Set();
+
+/// The demo's docker driver and browser reach the faucet on the host, so the demo sets HOST.
+const HOST = process.env.HOST ?? '127.0.0.1';
+
 TOKENS.forEach((t) => {
   if (!t.address) console.error(`note: ${t.symbol} has no address, it will be skipped`);
 });
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`demo faucet on ${PORT}, funding from ${funder}, tokens: ${TOKENS.filter((t) => t.address).map((t) => t.symbol).join(', ')}`);
+server.listen(PORT, HOST, () => {
+  console.log(`demo faucet on ${HOST}:${PORT}, funding from ${funder}, tokens: ${TOKENS.filter((t) => t.address).map((t) => t.symbol).join(', ')}`);
 });

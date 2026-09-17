@@ -100,7 +100,7 @@ pkill -f private-trade-solver 2>/dev/null || true
 rm -rf out-json/sub-solver-offers; mkdir -p out-json/sub-solver-offers
 SUBSOLVER_PORT="${SUBSOLVER_PORT:-9100}"
 OFFERS_DIR="${ROOT}/out-json/sub-solver-offers" SOLVE_LOG=/tmp/private-trade-solve.log \
-  PORT="${SUBSOLVER_PORT}" nohup node "${ROOT}/subsolver/private-trade-solver.mjs" >/tmp/subsolver.out 2>&1 &
+  PORT="${SUBSOLVER_PORT}" HOST=0.0.0.0 nohup node "${ROOT}/subsolver/private-trade-solver.mjs" >/tmp/subsolver.out 2>&1 &
 
 log "starting the link service"
 pkill -f link-service/server.mjs 2>/dev/null || true

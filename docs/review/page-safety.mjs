@@ -218,6 +218,7 @@ async function serviceWith(extraEnv, chain = {}) {
     orderbook: orderbook.url,
     extraEnv: {
       PRIVATE_TRADE_DEV_KEYS: `${MAKER}=${MAKER_KEY},${TAKER}=${TAKER_KEY}`,
+      DEV_ENDPOINTS: '1',
       ...extraEnv,
     },
   });
